@@ -1,26 +1,27 @@
-from dotenv import load_dotenv
 from core.launch.gravity_turn import gravity_turn
+from core.orbital.circularization import circularization
+from utils import SpaceLogger
 
-load_dotenv()
+logger = SpaceLogger("KOS")
 
 
 def main():
     """Main entry point for the KOS system."""
-    # try:
-    #     conn = krpc.connect(
-    #         name="Launch Sequence",
-    #         address=os.getenv("IP"),
-    #         rpc_port=8075,
-    #         stream_port=8076,
-    #     )
-    #     print("Launch control connected!")
-    # except:
-    #     print("Failed to connect to launch control")
-    #     raise
+    logger.mission_start("KOS LAUNCH SEQUENCE")
 
-    print("Starting gravity turn...")
-    gravity_turn()
-    print("Gravity turn completed!")
+    try:
+        logger.info("Starting gravity turn...")
+        gravity_turn()
+        logger.status("Gravity turn completed!")
+
+        logger.info("Starting circularization...")
+        circularization()
+        logger.status("Circularization completed!")
+
+        logger.mission_complete("KOS LAUNCH SEQUENCE")
+    except Exception as e:
+        logger.error(f"Mission failed: {str(e)}")
+        raise
 
 
 if __name__ == "__main__":
