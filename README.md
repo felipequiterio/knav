@@ -1,18 +1,16 @@
-# KOS - Kerbal Orbital System
+# KNAV - Kerbal Navigation and Autopilot
 
 A comprehensive control system for Kerbal Space Program (KSP) that automates various spaceflight operations using kRPC. This project aims to provide a robust and reliable automation system for various spacecraft operations in KSP.
 
 ## Features
 
 - 🚀 Automated Launch System
+  - Gravity Turn Optimization
+  - Stage Management
+  - Fuel Monitoring
 - 🛰️ Orbital Maneuvers
   - Circularization
-  - Orbital Transfers
-  - Rendezvous
-- 🎯 Precision Landing
-- 🔄 Docking Operations
-- 📊 Telemetry and Monitoring
-- 🎮 Manual Override Capabilities
+
 
 ## Prerequisites
 
@@ -47,35 +45,28 @@ A comprehensive control system for Kerbal Space Program (KSP) that automates var
 
 ```
 kos/
-├── src/
+├── core/
 │   ├── launch/         # Launch sequence automation
+│   │   └── gravity_turn.py
 │   ├── orbital/        # Orbital maneuvers
 │   ├── docking/        # Docking operations
 │   ├── telemetry/      # Data collection and monitoring
 │   └── utils/          # Utility functions
-├── tests/              # Test cases
-├── config/             # Configuration files
-└── docs/              # Documentation
+├── docs/              # Documentation
+│   └── RESOURCES.md   # kRPC resource documentation
+└── main.py           # Main entry point
 ```
 
-## Contributing
+## Features in Detail
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+### Launch System
+- Automated gravity turn with optimized ascent profile
+- Real-time fuel monitoring and stage management
+- Dynamic pitch control based on flight conditions
+- Automatic stage separation when fuel is depleted
 
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Kerbal Space Program team for creating an amazing game
-- kRPC developers for providing the automation interface
-- The KSP modding community for inspiration and support
-
-## Contact
-
-For questions and support, please open an issue in the GitHub repository.
-
----
-
-*This project is not affiliated with Squad or Take-Two Interactive.*
+### Telemetry System
+- Color-coded logging with timestamps
+- Mission status tracking
+- Real-time resource monitoring
+- Formatted telemetry data display
