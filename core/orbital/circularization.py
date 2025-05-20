@@ -66,7 +66,7 @@ def circularization():
     # Create first maneuver node at apoapsis
     ut_apo = conn.space_center.ut + vsl.orbit.time_to_apoapsis
     node1 = vsl.control.add_node(ut_apo, prograde=delta_v1)
-    logger.status(f"First maneuver node created at UT={ut_apo:.1f}")
+    logger.maneuver(f"First maneuver node created at UT={ut_apo:.1f}")
 
     # Estimate burn time
     dt_burn1 = calculate_burn_time(vsl, delta_v1)
@@ -79,13 +79,13 @@ def circularization():
 
     # Execute first burn
     vsl.auto_pilot.reference_frame = node1.reference_frame
-    logger.status("Aligning with first node direction")
+    logger.align("Aligning with first node direction")
     direction = node1.direction(node1.reference_frame)
     vsl.auto_pilot.target_direction = direction
     vsl.auto_pilot.engage()
     vsl.control.sas = True
     vsl.auto_pilot.wait()
-    logger.status("Vessel aligned with first maneuver node")
+    logger.align("Vessel aligned with first maneuver node")
 
     remaining = conn.add_stream(getattr, node1, "remaining_delta_v")
     logger.burn("First circularization burn initiated")
@@ -114,7 +114,7 @@ def circularization():
     # Create second maneuver node at periapsis
     ut_peri = conn.space_center.ut + vsl.orbit.time_to_periapsis
     node2 = vsl.control.add_node(ut_peri, prograde=delta_v2)
-    logger.status(f"Second maneuver node created at UT={ut_peri:.1f}")
+    logger.maneuver(f"Second maneuver node created at UT={ut_peri:.1f}")
 
     # Estimate burn time
     dt_burn2 = calculate_burn_time(vsl, abs(delta_v2))
@@ -127,13 +127,13 @@ def circularization():
 
     # Execute second burn
     vsl.auto_pilot.reference_frame = node2.reference_frame
-    logger.status("Aligning with second node direction")
+    logger.align("Aligning with second node direction")
     direction = node2.direction(node2.reference_frame)
     vsl.auto_pilot.target_direction = direction
     vsl.auto_pilot.engage()
     vsl.control.sas = True
     vsl.auto_pilot.wait()
-    logger.status("Vessel aligned with second maneuver node")
+    logger.align("Vessel aligned with second maneuver node")
 
     remaining = conn.add_stream(getattr, node2, "remaining_delta_v")
     logger.burn("Second circularization burn initiated")
@@ -157,4 +157,3 @@ def circularization():
     logger.telemetry(final_telemetry)
 
     logger.mission_complete("CIRCULARIZATION")
-    logger.status("Circular orbit achieved. Mission nominal!")
