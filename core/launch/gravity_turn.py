@@ -3,9 +3,11 @@ import time
 from dotenv import load_dotenv
 import krpc
 import os
+from utils import SpaceLogger
 
 last_status = 0
 load_dotenv()
+logger = SpaceLogger("GRAVITY_TURN")
 
 
 # –– constants –– --------------------------------------------------
@@ -13,10 +15,10 @@ TURN_START_ALT = 250  # [m] altitude where the gravity turn begins
 TARGET_APOAPSIS = 100_000  # [m]
 DT = 0.05  # [s] guidance cycle period
 
+
 # –– main –– --------------------------------------------------
-
-
 def gravity_turn():
+    logger.mission_start("GRAVITY TURN")
     conn = krpc.connect(
         name="Gravity Turn",
         address=os.getenv("IP"),
@@ -31,17 +33,33 @@ def gravity_turn():
     flt = vsl.flight(nrf)
 
     # –– helper lambdas (wrapped in streams would be faster) –– ------------
-    ALT = lambda: flt.mean_altitude  # [m] above sea level
-    APO = lambda: vsl.orbit.apoapsis_altitude  # [m]
-    SPEED = lambda: flt.speed  # [m/s]
-    V_VERT = lambda: flt.vertical_speed  # [m/s]
-    V_HORIZ = lambda: flt.horizontal_speed  # [m/s]
-    DRAG = lambda: flt.drag  # 3‑vector [N]
-    MASS = lambda: vsl.mass  # [kg]
-    THRUST = lambda: vsl.thrust  # [N]
-    ALPHA = lambda: math.radians(flt.angle_of_attack)  # [rad]
-    RADIUS = lambda: vsl.orbit.radius  # [m] planet‑center
+    ALT = conn.add_stream(getattr, vsl.flight(), "mean_altitude")  # [m]
+    APO = conn.add_stream(getattr, vsl.orbit, "apoapsis_altitude")  # [m]
+    SPEED = conn.add_stream(getattr, flt, "speed")  # [m/s]
+    V_VERT = conn.add_stream(getattr, flt, "vertical_speed")  # [m/s]
+    V_HORIZ = conn.add_stream(getattr, flt, "horizontal_speed")  # [m/s]
+    DRAG = conn.add_stream(getattr, flt, "drag")  # 3‑vector [N]
+    MASS = conn.add_stream(getattr, vsl, "mass")  # [kg]
+    THRUST = conn.add_stream(getattr, vsl, "thrust")  # [N]
+    ALPHA = conn.add_stream(getattr, flt, "angle_of_attack")  # [rad]
+    RADIUS = conn.add_stream(getattr, vsl.orbit, "radius")  # [m] planet‑center
     G_LOCAL = lambda r: body.gravitational_parameter / r**2  # [m/s²]
+
+    # Add fuel monitoring streams
+    LIQUID_FUEL = conn.add_stream(vsl.resources.amount, "LiquidFuel")
+    OXIDIZER = conn.add_stream(vsl.resources.amount, "Oxidizer")
+    SOLID_FUEL = conn.add_stream(vsl.resources.amount, "SolidFuel")
+
+    # Log initial launch parameters
+    initial_telemetry = {
+        "Target Apoapsis": f"{TARGET_APOAPSIS:,.0f} m",
+        "Turn Start Altitude": f"{TURN_START_ALT:,.0f} m",
+        "Initial Mass": f"{MASS():,.0f} kg",
+        "Initial Thrust": f"{THRUST():,.0f} N",
+        "Local Gravity": f"{G_LOCAL(RADIUS()):.2f} m/s²",
+    }
+    logger.info("Launch Parameters:")
+    logger.telemetry(initial_telemetry)
 
     # –– launch config –– --------------------------------------------------
     vsl.control.sas = False
@@ -50,13 +68,12 @@ def gravity_turn():
     vsl.auto_pilot.target_pitch_and_heading(90, 90)
     vsl.control.throttle = 1.0
     vsl.control.activate_next_stage()  # fire the engines!
+    logger.burn("Launch initiated!")
 
     # –– main ascent loop –– ----------------------------------------------
     last_t = conn.space_center.ut
-    print("\n" + "=" * 60)
-    print(f"Starting main ascent loop at t={last_t:.1f}s")
-    print("=" * 60 + "\n")
-    print("[STATUS] Waiting to clear tower...")
+    logger.status("Starting main ascent loop")
+    logger.status("Waiting to clear tower...")
 
     while True:
         time.sleep(DT)
@@ -66,8 +83,6 @@ def gravity_turn():
 
         # Skip ODE until we've cleared the tower
         if ALT() < TURN_START_ALT or SPEED() < 1.0:
-            # if ALT() < TURN_START_ALT:
-            #     print(f"[STATUS] Waiting to clear tower... Alt: {ALT():.1f}m")
             continue
 
         # ----------- gather instantaneous state --------------------------
@@ -81,15 +96,32 @@ def gravity_turn():
         alpha = ALPHA()
         g = G_LOCAL(RADIUS())
 
+        # Check fuel levels and stage if needed
+        if T == 0:  # No thrust means we need to check if we should stage
+            liquid_fuel = LIQUID_FUEL()
+            oxidizer = OXIDIZER()
+            solid_fuel = SOLID_FUEL()
+            logger.status(
+                f"Fuel levels: Liquid {liquid_fuel:.1f}, Oxidizer {oxidizer:.1f}, Solid {solid_fuel:.1f}"
+            )
+            vsl.control.activate_next_stage()
+            time.sleep(0.5)  # Give time for stage activation
+            continue
+
         if t % 10 < DT:  # Print every ~10 seconds
-            print("\n" + "-" * 40)
-            print(f"Flight status at T+{t:.1f}s:")
-            print("-" * 40)
-            print(f"  • Speed:     {v:.1f} m/s")
-            print(f"  • Altitude:  {ALT():.1f} m")
-            print(f"  • Apoapsis:  {APO():.1f} m")
-            print(f"  • Pitch:     {90.0 - math.degrees(gamma):.1f}°")
-            print("-" * 40 + "\n")
+            flight_telemetry = {
+                "Speed": f"{v:.1f} m/s",
+                "Altitude": f"{ALT():.1f} m",
+                "Apoapsis": f"{APO():.1f} m",
+                "Pitch": f"{90.0 - math.degrees(gamma):.1f}°",
+                "Mass": f"{m:.0f} kg",
+                "Thrust": f"{T:.0f} N",
+                "Drag": f"{D_mag:.0f} N",
+                "Liquid Fuel": f"{LIQUID_FUEL():.1f}",
+                "Oxidizer": f"{OXIDIZER():.1f}",
+                "Solid Fuel": f"{SOLID_FUEL():.1f}",
+            }
+            logger.telemetry(flight_telemetry)
 
         # ---------- integrate gravity‑turn ODE ---------------------------
         if v > 0.1:  # avoid div‑by‑zero
@@ -104,16 +136,19 @@ def gravity_turn():
         pitch_cmd = max(0.0, min(90.0, 90.0 - math.degrees(gamma_next)))
         vsl.auto_pilot.target_pitch_and_heading(pitch_cmd, 90)
 
-        # ---------- simple ascent termination logic ---------------------
+        # ---------- ascent termination logic ---------------------
         if APO() > TARGET_APOAPSIS * 0.98:
-            print("\n" + "=" * 60)
-            print("Approaching target apoapsis")
-            print("Final flight status:")
-            print("=" * 60)
-            print(f"  • Speed:     {v:.1f} m/s")
-            print(f"  • Altitude:  {ALT():.1f} m")
-            print(f"  • Apoapsis:  {APO():.1f} m")
-            print("=" * 60 + "\n")
+            logger.status("Approaching target apoapsis")
+
+            final_telemetry = {
+                "Final Speed": f"{v:.1f} m/s",
+                "Final Altitude": f"{ALT():.1f} m",
+                "Final Apoapsis": f"{APO():.1f} m",
+                "Final Pitch": f"{pitch_cmd:.1f}°",
+                "Remaining Mass": f"{m:.0f} kg",
+                "Time to Apoapsis": f"{vsl.orbit.time_to_apoapsis / 60:.1f} min",
+            }
+            logger.telemetry(final_telemetry)
             break
 
     # –– cutoff & coast to space –– ---------------------------------------
@@ -121,11 +156,12 @@ def gravity_turn():
     while APO() < TARGET_APOAPSIS:
         time.sleep(0.1)
     vsl.control.throttle = 0.0
-    print("\n[STATUS] Target apoapsis reached, coasting to space...")
+    logger.status("Target apoapsis reached, coasting to space...")
 
     while ALT() < 70_500:
         time.sleep(0.2)
-    print("[STATUS] Out of atmosphere - prepare for circularisation burn.\n")
+    logger.status("Out of atmosphere - prepare for circularisation burn.")
+    logger.mission_complete("GRAVITY TURN")
 
 
 # if __name__ == "__main__":
