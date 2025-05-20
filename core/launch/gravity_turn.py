@@ -98,12 +98,7 @@ def gravity_turn():
 
         # Check fuel levels and stage if needed
         if T == 0:  # No thrust means we need to check if we should stage
-            liquid_fuel = LIQUID_FUEL()
-            oxidizer = OXIDIZER()
-            solid_fuel = SOLID_FUEL()
-            logger.status(
-                f"Fuel levels: Liquid {liquid_fuel:.1f}, Oxidizer {oxidizer:.1f}, Solid {solid_fuel:.1f}"
-            )
+            logger.stage("Activating next stage...")
             vsl.control.activate_next_stage()
             time.sleep(0.5)  # Give time for stage activation
             continue
@@ -161,6 +156,17 @@ def gravity_turn():
     while ALT() < 70_500:
         time.sleep(0.2)
     logger.status("Out of atmosphere - prepare for circularisation burn.")
+
+    logger.fairing("Jettisoning fairings...")
+    for part in vsl.parts.all:
+        if part.title == "Mothra Aerodynamic Fairing":
+            for module in part.modules:
+                if module.name == "ModuleDecouple":
+                    module.trigger_event("Decouple")
+        if part.title == "G-01 Fairing Half":
+            for module in part.modules:
+                if module.name == "ModuleDecouple":
+                    module.trigger_event("Decouple")
     logger.mission_complete("GRAVITY TURN")
 
 
