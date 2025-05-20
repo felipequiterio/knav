@@ -82,6 +82,8 @@ class SpaceLogger:
             "warning": ("⚠️", "WARN", YELLOW),
             "error": ("❌", "ERR", RED),
             "debug": ("🔍", "DBUG", MAGENTA),
+            "status": ("📊", "STAT", CYAN),
+            "fairing": ("🛰️", "FRNG", GREEN),
         }
 
         for name, (emoji, tag, color) in space_ops.items():
@@ -138,6 +140,22 @@ class SpaceLogger:
 
         # Log it as a single message
         self.logger.info(telemetry_block)
+
+    def maneuver(self, msg):
+        """Log a maneuver message."""
+        self.logger.info(f"⚙️ [MNVR] {msg}")
+
+    def align(self, msg):
+        """Log an align message."""
+        self.logger.info(f"🎯 [ALGN] {msg}")
+
+    def fairing(self, msg):
+        """Log a fairing message."""
+        self.logger.info(f"🛡️ [FRNG] {msg}")
+
+    def stage(self, msg):
+        """Log a stage message."""
+        self.logger.info(f"🔧 [STG ] {msg}")
 
     # ---------------------------------------------------------------- internals
     def _banner(self, mission, state, color):
