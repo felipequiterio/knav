@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 import krpc
 from utils import SpaceLogger
+from core.parts.part_control import control_sas
 
 load_dotenv()
 logger = SpaceLogger("CIRCULARIZATION")
@@ -48,16 +49,6 @@ def circularization():
     r_p = vsl.orbit.periapsis
     a = 0.5 * (r_a + r_p)
 
-    # Log initial orbital parameters
-    initial_telemetry = {
-        "Apoapsis": f"{r_a:,.0f} m",
-        "Periapsis": f"{r_p:,.0f} m",
-        "Semi-major axis": f"{a:,.0f} m",
-        "Eccentricity": f"{vsl.orbit.eccentricity:.4f}",
-        "Orbital period": f"{vsl.orbit.period / 60:.1f} min",
-    }
-    logger.telemetry(initial_telemetry)
-
     # Step 1: Raise periapsis at apoapsis
     v_a = vis_viva(mu, r_a, a)
     v_circ = math.sqrt(mu / r_a)
@@ -77,25 +68,54 @@ def circularization():
     logger.warp(f"Warping to T-{dt_burn1 / 2:.1f}s (UT={warp_to:.1f})")
     conn.space_center.warp_to(warp_to)
 
-    # Execute first burn
     vsl.auto_pilot.reference_frame = node1.reference_frame
     logger.align("Aligning with first node direction")
     direction = node1.direction(node1.reference_frame)
-    vsl.auto_pilot.target_direction = direction
-    vsl.auto_pilot.engage()
-    vsl.control.sas = True
-    vsl.auto_pilot.wait()
-    logger.align("Vessel aligned with first maneuver node")
 
-    remaining = conn.add_stream(getattr, node1, "remaining_delta_v")
+    burn_start_ut = conn.space_center.ut
+    burn_end_ut = burn_start_ut + dt_burn1
+
+    vsl.auto_pilot.disengage()
+
+    # Enable SAS and ensure it switches to “maneuver-hold”.
+    control_sas(vsl, "maneuver")
+    logger.align(f"SAS mode confirmed: {vsl.control.sas_mode}")
+
+    # Execute first burn
     logger.burn("First circularization burn initiated")
-    vsl.control.throttle = 1.0
+    # Use remaining ΔV to drive cut-off for higher accuracy
+    remaining1 = conn.add_stream(getattr, node1, "remaining_delta_v")
 
-    while remaining() > 10.0:
+    # Main portion of the burn
+    vsl.control.throttle = 1.0
+    while remaining1() > 5.0:
         time.sleep(0.05)
 
+    # Feather throttle for the last few m/s to avoid overshoot
+    vsl.control.throttle = 0.05
+    while remaining1() > 1.0:
+        time.sleep(0.05)
+
+    # Ensure throttle is fully closed before proceeding
     vsl.control.throttle = 0.0
+    # After burn, switch to stability assist and allow SAS to disengage cleanly
+    vsl.control.sas = False
+    vsl.control.sas_mode = vsl.control.sas_mode.stability_assist
     time.sleep(0.5)
+
+    # Final pause to let physics settle before node removal
+    time.sleep(0.5)
+
+    # ── ΔV audit ──
+    dv_predicted = delta_v1  # m/s, based on maneuver computation
+    dv_remaining = remaining1()  # m/s left unperformed
+    dv_actual = dv_predicted - dv_remaining
+    logger.status(
+        "ΔV audit (burn-1): predicted {:.1f} m/s | actual {:.1f} m/s | residual {:.2f} m/s".format(
+            dv_predicted, dv_actual, dv_remaining
+        )
+    )
+
     node1.remove()
 
     # Step 2: Lower apoapsis at periapsis
@@ -127,19 +147,34 @@ def circularization():
 
     # Execute second burn
     vsl.auto_pilot.reference_frame = node2.reference_frame
-    logger.align("Aligning with second node direction")
-    direction = node2.direction(node2.reference_frame)
-    vsl.auto_pilot.target_direction = direction
-    vsl.auto_pilot.engage()
-    vsl.control.sas = True
-    vsl.auto_pilot.wait()
-    logger.align("Vessel aligned with second maneuver node")
+    logger.align("Aligning with second node direction via SAS")
+
+    # Disengage any active autopilot and use SAS maneuver mode (same trick as first burn)
+    vsl.auto_pilot.disengage()
+
+    # vsl.control.sas = True
+    # for _ in range(5):
+    #     vsl.control.sas_mode = SASMode.maneuver
+    #     time.sleep(0.1)
+    #     if vsl.control.sas_mode == SASMode.maneuver:
+    #         break
+
+    control_sas(vsl, "maneuver")
+    logger.align(f"SAS mode confirmed: {vsl.control.sas_mode}")
+    # Give SAS a moment to settle on the node direction
+    time.sleep(2)
 
     remaining = conn.add_stream(getattr, node2, "remaining_delta_v")
     logger.burn("Second circularization burn initiated")
     vsl.control.throttle = 1.0
 
-    while remaining() > 10.0:
+    # Burn until only a few m/s remain
+    while remaining() > 5.0:
+        time.sleep(0.05)
+
+    # Feather throttle for precision
+    vsl.control.throttle = 0.05
+    while remaining() > 1.0:
         time.sleep(0.05)
 
     vsl.control.throttle = 0.0
@@ -155,5 +190,3 @@ def circularization():
         "Orbital Period": f"{vsl.orbit.period / 60:.1f} min",
     }
     logger.telemetry(final_telemetry)
-
-    logger.mission_complete("CIRCULARIZATION")
