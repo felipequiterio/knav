@@ -115,7 +115,7 @@ class SpaceLogger:
 
     def error(self, msg):
         """Log an error message."""
-        self.logger.error(f"❌ {msg}")
+        self.logger.error(f"🔴 {msg}")
 
     def debug(self, msg):
         """Log a debug message."""
@@ -161,7 +161,7 @@ class SpaceLogger:
     def _banner(self, mission, state, color):
         """Create a mission banner with the given state."""
         bar = f"{color}{'═' * 70}{RESET}"
-        self.logger.info(f"\n{bar}\n🚀 MISSION {mission} {state}\n{bar}")
+        self.logger.info(f"\n{bar}\n🚀 {mission} {state}\n{bar}")
 
     @staticmethod
     def _table(data: dict) -> str:
