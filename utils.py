@@ -80,10 +80,12 @@ class SpaceLogger:
             "align": ("🎯", "ALGN", CYAN),
             "info": ("🟢", "INFO", GREEN),
             "warning": ("⚠️", "WARN", YELLOW),
-            "error": ("❌", "ERR", RED),
+            "error": ("❌", "ERR ", RED),
             "debug": ("🔍", "DBUG", MAGENTA),
             "status": ("📊", "STAT", CYAN),
             "fairing": ("🛰️", "FRNG", GREEN),
+            "sas": ("🧭", "SAS ", CYAN),
+            "auto_pilot": ("🤖", "APLT", MAGENTA),
         }
 
         for name, (emoji, tag, color) in space_ops.items():
@@ -107,19 +109,19 @@ class SpaceLogger:
 
     def info(self, msg):
         """Log general information."""
-        self.logger.info(f"🟢 {msg}")
+        self.logger.info(f"🟢 [INFO] {msg}")
 
     def warning(self, msg):
         """Log a warning message."""
-        self.logger.warning(f"⚠️ {msg}")
+        self.logger.warning(f"⚠️ [WARN] {msg}")
 
     def error(self, msg):
         """Log an error message."""
-        self.logger.error(f"🔴 {msg}")
+        self.logger.error(f"🔴 [ERR ] {msg}")
 
     def debug(self, msg):
         """Log a debug message."""
-        self.logger.debug(f"🔍 {msg}")
+        self.logger.debug(f"🔍 [DBUG] {msg}")
 
     def status(self, msg):
         """Log a status update."""
@@ -156,6 +158,14 @@ class SpaceLogger:
     def stage(self, msg):
         """Log a stage message."""
         self.logger.info(f"🔧 [STG ] {msg}")
+
+    def auto_pilot(self, msg):
+        """Log an auto pilot message."""
+        self.logger.info(f"🤖 [APLT] {msg}")
+
+    def sas(self, msg):
+        """Log a SAS message."""
+        self.logger.info(f"🧭 [SAS ] {msg}")
 
     # ---------------------------------------------------------------- internals
     def _banner(self, mission, state, color):
