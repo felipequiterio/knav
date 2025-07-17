@@ -6,34 +6,14 @@ from dotenv import load_dotenv
 import krpc
 from utils import SpaceLogger
 from core.parts.part_control import control_sas
+from core.utils.formulas import vis_viva, calculate_burn_time
 
 load_dotenv()
 logger = SpaceLogger("CIRCULARIZATION")
 
 
-# –– util –– ---------------------------------------------------------------
-def vis_viva(mu: float, r: float, a: float) -> float:
-    """Instantaneous orbital velocity (vis-viva equation)."""
-    return math.sqrt(mu * (2 / r - 1 / a))
-
-
-def calculate_burn_time(vessel, delta_v: float) -> float:
-    """Burn time estimate using Tsiolkovsky equation."""
-    g0 = vessel.orbit.body.surface_gravity
-    F = vessel.available_thrust
-    Isp = vessel.specific_impulse
-    m0 = vessel.mass
-    if F <= 0.0:
-        logger.error("No thrust available! Are stages activated?")
-        raise RuntimeError("No thrust available! Are stages activated?")
-    m1 = m0 / math.exp(delta_v / (Isp * g0))
-    flow_rate = F / (Isp * g0)  # kg/s
-    return (m0 - m1) / flow_rate
-
-
 # –– main –– ----------------------------------------------------------------
 def circularization():
-    logger.mission_start("CIRCULARIZATION")
     conn = krpc.connect(
         name="Circularization",
         address=os.getenv("IP"),
@@ -60,7 +40,11 @@ def circularization():
     logger.maneuver(f"First maneuver node created at UT={ut_apo:.1f}")
 
     # Estimate burn time
-    dt_burn1 = calculate_burn_time(vsl, delta_v1)
+    Isp = vsl.specific_impulse  # [s]
+    g0 = body.surface_gravity  # [m/s^2]
+    m0 = vsl.mass
+    m_dot = vsl.available_thrust / (Isp * g0)
+    dt_burn1 = calculate_burn_time(m_dot, m0, delta_v1, Isp, g0)
     logger.status(f"Estimated burn time: {dt_burn1:.1f}s")
 
     # Warp to T- (Δt/2)
@@ -79,7 +63,6 @@ def circularization():
 
     # Enable SAS and ensure it switches to “maneuver-hold”.
     control_sas(vsl, "maneuver")
-    logger.align(f"SAS mode confirmed: {vsl.control.sas_mode}")
 
     # Execute first burn
     logger.burn("First circularization burn initiated")
@@ -137,27 +120,21 @@ def circularization():
     logger.maneuver(f"Second maneuver node created at UT={ut_peri:.1f}")
 
     # Estimate burn time
-    dt_burn2 = calculate_burn_time(vsl, abs(delta_v2))
+    m0 = vsl.mass
+    m_dot = vsl.available_thrust / (Isp * g0)
+    dt_burn2 = calculate_burn_time(m_dot, m0, abs(delta_v2), Isp, g0)
     logger.status(f"Estimated burn time: {dt_burn2:.1f}s")
 
     # Warp to T- (Δt/2)
     warp_to = node2.ut - dt_burn2 / 2 - 5
     logger.warp(f"Warping to T-{dt_burn2 / 2:.1f}s (UT={warp_to:.1f})")
     conn.space_center.warp_to(warp_to)
-
     # Execute second burn
     vsl.auto_pilot.reference_frame = node2.reference_frame
     logger.align("Aligning with second node direction via SAS")
 
     # Disengage any active autopilot and use SAS maneuver mode (same trick as first burn)
     vsl.auto_pilot.disengage()
-
-    # vsl.control.sas = True
-    # for _ in range(5):
-    #     vsl.control.sas_mode = SASMode.maneuver
-    #     time.sleep(0.1)
-    #     if vsl.control.sas_mode == SASMode.maneuver:
-    #         break
 
     control_sas(vsl, "maneuver")
     logger.align(f"SAS mode confirmed: {vsl.control.sas_mode}")
