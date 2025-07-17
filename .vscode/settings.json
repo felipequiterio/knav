@@ -9,5 +9,8 @@
     "editor.codeActionsOnSave": {
         "source.fixAll": "explicit",
         "source.fixAll.ruff": "explicit"
-    }
+    },
+    "ruff.lint.ignore": [
+        "E731"
+    ]
 }
