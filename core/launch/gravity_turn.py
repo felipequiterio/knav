@@ -1,18 +1,28 @@
-import krpc
 import os
-from dotenv import load_dotenv
-from ..utils import SpaceLogger
+import krpc
 import math
 import time
-from core.parts.part_control import (
-    deploy_fairing,
-    control_solar_panel,
-    control_antenna,
+
+from ..utils import SpaceLogger
+from core.utils.formulas import (
+    dgamma_dt,
+    clamp,
+    gravity_local,
+    thrust_to_weight,
+    acceleration,
 )
 
-logger = SpaceLogger("Pre-Launch Gravity Turn")
+# ---------------------------------------------------------------------------
+# Configuration constants
+# ---------------------------------------------------------------------------
+GUIDANCE_DT = 0.05  # [s] integration / guidance cycle period
+TURN_START_ALT = 250  # [m] altitude threshold before we start integrating
+TARGET_APOAPSIS = 150_000  # [m] desired apoapsis altitude (vacuum)
+MAX_Q_RELATIVE = 0.30  # Max-Q as fraction of sea-level static pressure
+MIN_TWR = 1.2  # Abort if initial thrust-to-weight ratio below this threshold
+MIN_ACCEL = 0.5  # Abort if initial acceleration below this threshold [m/s²]
 
-load_dotenv()
+logger = SpaceLogger("GRAVITY_TURN")
 
 
 def pre_launch():
@@ -33,26 +43,26 @@ def pre_launch():
     # –– reference frames –– ----------------------------------------------
     nrf = body.non_rotating_reference_frame  # inertial‑ish
 
-    # -- altitude
-    radius = conn.add_stream(getattr, vsl.orbit, "radius")  # [m]
-
     # -- mass
     mass = conn.add_stream(getattr, vsl, "mass")  # [kg]
 
     # -- radius
     radius = conn.add_stream(getattr, vsl.orbit, "radius")  # [m]
 
+    # -- gravitational parameter
+    μ = body.gravitational_parameter  # [m³ s⁻²]
+
     # -- gravity (as a function of current radius)
-    gravity_local = lambda: body.gravitational_parameter / (radius() ** 2)  # [m/s²]
+    grav_local = lambda: gravity_local(μ, radius())  # [m/s²]
 
     # -- thrust
     available_thrust = conn.add_stream(getattr, vsl, "available_thrust")  # [N]
-    thrust_to_weight = lambda: available_thrust() / (
-        mass() * gravity_local()
-    )  # [dimensionless]
+    thrust_to_weight_ratio = lambda: thrust_to_weight(
+        available_thrust(), mass(), grav_local()
+    )
 
     # -- acceleration (computed from thrust and mass as flight.acceleration is unavailable)
-    acceleration = lambda: available_thrust() / mass()  # [m/s²]
+    accel = lambda: acceleration(available_thrust(), mass())  # [m/s²]
 
     # -- activate next stage
     vsl.control.throttle = 1.0
@@ -77,10 +87,6 @@ def pre_launch():
     g0 = μ / R**2  # surface g  [m s⁻²]
     logger.info(f"Surface gravity: {g0:.2f} m s⁻²")
 
-    # -- rotational period
-    Ω = 2 * math.pi / body.rotational_period  # [rad s⁻¹]
-    logger.info(f"Rotational period: {Ω:.2f} rad s⁻¹")
-
     # -- atmosphere
     has_atmo = body.has_atmosphere
     logger.info(f"Has atmosphere: {has_atmo}")
@@ -88,138 +94,165 @@ def pre_launch():
     logger.info(f"Atmosphere depth: {atm_top:.2f} m")
 
     # -- check thrust to weight ratio
-    if thrust_to_weight() < 1.2:
+    if thrust_to_weight_ratio() < 1.2:
         logger.error("Thrust to weight ratio is too low, aborting")
         return
-    logger.info(f"Thrust to weight ratio is {thrust_to_weight():.2f}, continuing...")
+    logger.info(
+        f"Thrust to weight ratio is {thrust_to_weight_ratio():.2f}, continuing..."
+    )
 
     # -- acceletarion
-    if acceleration() < 0.5:
+    if accel() < 0.5:
         logger.error("Acceleration is too low, aborting")
         return
-    logger.info(f"GO - a₀ = {acceleration():.2f} m/s²")
+    logger.info(f"GO - a₀ = {accel():.2f} m/s²")
 
 
-def gravity_turn(orbit_target=120_000, safety_margin_km=5):
-    """
-    One-function gravity-turn that compensates for in-atmosphere drag
-    by (i) waiting for thin air *and* (ii) aiming a bit high.
+def gravity_turn():
+    """Launch guidance that steers the vehicle using the planar gravity-turn
+    ODE implemented in :pyfunc:`core.utils.formulas.dgamma_dt`.
 
-    Parameters
-    ----------
-    orbit_target : float
-        Desired *final* apoapsis altitude [m] **after** drag-settling.
-    safety_margin_km : float
-        Extra km to build into the live apoapsis while still in air.
     """
 
-    # --------------- connection / handles ----------------------------------
+    logger.mission_start("GRAVITY TURN")
+
+    # -- Establish kRPC connection ----------------------------------------
     conn = krpc.connect(
         name="Gravity Turn",
         address=os.getenv("IP"),
         rpc_port=8075,
         stream_port=8076,
     )
+
     vsl = conn.space_center.active_vessel
     body = vsl.orbit.body
+    nrf = body.non_rotating_reference_frame  # Planet-centred inertial-ish
+    flt = vsl.flight(nrf)
 
-    # --------------- atmosphere metadata -----------------------------------
-    has_atmo = body.has_atmosphere
-    atm_top = body.atmosphere_depth if has_atmo else 0.0  # [m]
+    # kRPC streams (fast repeated access) ----------------------------------
+    ALT = conn.add_stream(getattr, vsl.flight(), "mean_altitude")  # [m]
+    APO = conn.add_stream(getattr, vsl.orbit, "apoapsis_altitude")  # [m]
+    SPEED = conn.add_stream(getattr, flt, "speed")  # [m/s]
+    V_VERT = conn.add_stream(getattr, flt, "vertical_speed")  # [m/s]
+    V_HORIZ = conn.add_stream(getattr, flt, "horizontal_speed")  # [m/s]
+    RADIUS = conn.add_stream(getattr, vsl.orbit, "radius")  # [m]
+    MASS = conn.add_stream(getattr, vsl, "mass")  # [kg]
+    THRUST = conn.add_stream(getattr, vsl, "available_thrust")  # [N]
+    Q_DYN = conn.add_stream(getattr, vsl.flight(), "dynamic_pressure")  # [Pa]
 
-    # --------------- dynamic streams ---------------------------------------
-    alt = conn.add_stream(getattr, vsl.flight(), "mean_altitude")
-    apo = conn.add_stream(getattr, vsl.orbit, "apoapsis_altitude")
-    q_dyn = conn.add_stream(getattr, vsl.flight(), "dynamic_pressure")
-    thrust = conn.add_stream(getattr, vsl, "thrust")  # [N]
+    # Sea-level static pressure for Max-Q calculation
+    p0 = body.pressure_at(0) if body.has_atmosphere else 0.0
+    q_limit = MAX_Q_RELATIVE * p0 if body.has_atmosphere else float("inf")
 
-    # --------------- pitch profile (unchanged) -----------------------------
-    h_s = 500 if not has_atmo else max(200, 0.02 * atm_top)
-    h_e = 0.4 * orbit_target if not has_atmo else 0.65 * atm_top
-    k = 1.5
+    # Gravitational parameter
+    μ = body.gravitational_parameter
 
-    # --------------- max-Q limit -------------------------------------------
-    p0 = body.pressure_at(0) if has_atmo else 0.0
-    q_limit = 0.3 * p0 if has_atmo else float("inf")
+    # Fetch instantaneous state --------------------------------------
+    v = SPEED()
+    v_vert = V_VERT()
+    v_horiz = V_HORIZ()
+    gamma = math.atan2(v_vert, v_horiz)  # +ve above local horizon [rad]
+    r = RADIUS()
+    m = MASS()
+    T = THRUST()
+    q_dyn = Q_DYN()
 
-    # --------------- autopilot ---------------------------------------------
+    # -- Autopilot initialisation ----------------------------------------
+    vsl.control.sas = False
+    logger.sas("SAS disabled")
     ap = vsl.auto_pilot
     ap.engage()
+    logger.auto_pilot("Autopilot engaged")
+    ap.target_roll = 90  # Heads east
     ap.target_heading = 90
-    ap.target_roll = 0
+    ap.target_pitch_and_heading(90, 90)  # Straight up
 
-    approach_band = orbit_target + 5_000
-    final_band = orbit_target + 1_000
-
-    # --------------- helper: cutoff criterion ------------------------------
-    def safe_to_cut():
-        """
-        True when (a) live apoapsis high enough AND (b) ship is above ~95 % of
-        the atmosphere or q_dyn ~ 0.  Works for airless worlds too.
-        """
-        high_enough = apo() >= orbit_target
-        thin_air = (alt() >= 0.95 * atm_top) if has_atmo else True
-        negligible_q = q_dyn() < 100.0  # ≈0.1 kPa
-        return high_enough and (thin_air or negligible_q)
-
-    # --------------- helper: stage fuel ------------------------------------
-
-    logger.info(f"Resouce names: {vsl.resources.names}")
-    logger.info(f"Liquid Hydrogen: {vsl.resources.amount('LqdHydrogen')}")
-    # --------------- main loop ---------------------------------------------
-    logger.status("Gravity-turn ascent begins")
+    # -- Ignite engines ----------------------------------------------------
     vsl.control.throttle = 1.0
     vsl.control.activate_next_stage()
+    logger.burn("Engines ignited, lift-off! 🚀")
 
+    last_t = conn.space_center.ut
+
+    # -- Main guidance loop ------------------------------------------------
     while True:
-        h = alt()
+        time.sleep(GUIDANCE_DT)
+        t = conn.space_center.ut
+        dt = t - last_t
+        last_t = t
 
-        # ---- pitch S-curve -------------------------------------------------
-        if h < h_s:
-            pitch = 90
-        elif h > h_e:
-            pitch = 0
-        else:
-            F = (h - h_s) / (h_e - h_s)
-            pitch = 90 * (1 - F**k)
-        ap.target_pitch = pitch
-
-        # ---- throttle ------------------------------------------------------
-        if q_dyn() > q_limit:  # Max-Q guard
-            vsl.control.throttle = 0.6
-        elif apo() < approach_band:  # still far → full
-            vsl.control.throttle = 1.0
-        elif apo() < final_band:  # feather
-            vsl.control.throttle = 0.3
-        else:  # creep
-            vsl.control.throttle = 0.1
-
-        # ---- stage depletion ------------------------------------------------
-        t = thrust()
-        if t == 0:  # No thrust means we need to check if we should stage
-            logger.stage("Activating next stage...")
-            vsl.control.activate_next_stage()
-            time.sleep(3)  # Give time for stage activation
+        # Wait until clear of the tower ----------------------------------
+        if ALT() < TURN_START_ALT or SPEED() < 1.0:
+            continue
+        if ALT() == TURN_START_ALT:
+            logger.info("Approaching turn start altitude - preparing to integrate")
             continue
 
-        # ---- cut-off logic -------------------------------------------------
-        apo_target_live = (
-            orbit_target + safety_margin_km * 1000
-            if h < 0.95 * atm_top
-            else orbit_target
-        )
-        if apo() >= apo_target_live and safe_to_cut():
+        # Fetch instantaneous state --------------------------------------
+        v = SPEED()
+        v_vert = V_VERT()
+        v_horiz = V_HORIZ()
+        gamma = math.atan2(v_vert, v_horiz)  # +ve above local horizon [rad]
+        r = RADIUS()
+        m = MASS()
+        T = THRUST()
+        q_dyn = Q_DYN()
+
+        # Throttle management (simple Max-Q and apoapsis guards) ----------
+        if q_dyn > q_limit:
+            vsl.control.throttle = 0.6  # ease off through Max-Q
+        elif APO() < TARGET_APOAPSIS * 0.8:
+            vsl.control.throttle = 1.0  # full beans while far from Ap
+        elif APO() < TARGET_APOAPSIS * 0.95:
+            vsl.control.throttle = 0.4  # feather as we approach target
+        else:
+            vsl.control.throttle = 0.1  # creep for fine control
+
+        # Stage if current stage is empty ---------------------------------
+        if T == 0:
+            logger.stage("Staging ...")
+            vsl.control.activate_next_stage()
+            time.sleep(0.5)
+            continue  # Skip guidance update this frame
+
+        # ----------------------------------------------------------------
+        # Gravity-turn ODE integration (γ only) ---------------------------
+        # ----------------------------------------------------------------
+        if v > 0.1 and r > 0.0:  # basic sanity guards
+            gamma_dot = dgamma_dt(v, r, gamma, μ, T, m)  # α=L=0
+            gamma_next = gamma + gamma_dot * dt
+        else:
+            gamma_next = gamma  # still essentially vertical
+
+        # Convert desired γ to pitch angle and command the autopilot ------
+        pitch_cmd = clamp(90.0 - math.degrees(gamma_next), 0.0, 90.0)
+        ap.target_pitch_and_heading(pitch_cmd, 90)
+
+        # Telemetry every ~10 s ------------------------------------------
+        if t % 10.0 < GUIDANCE_DT:
+            logger.telemetry(
+                {
+                    "Alt": f"{ALT():.0f} m",
+                    "Ap": f"{APO():.0f} m",
+                    "Pitch": f"{pitch_cmd:.1f}°",
+                    "v": f"{v:.1f} m/s",
+                    "γ": f"{math.degrees(gamma):.1f}°",
+                    "m": f"{m:.0f} kg",
+                    "T": f"{T:.0f} N",
+                    "q_dyn": f"{q_dyn / 1000:.1f} kPa",
+                }
+            )
+
+        # ----- Termination logic: target apoapsis reached ---------------
+        if APO() >= TARGET_APOAPSIS * 0.98 and q_dyn < 100.0:
+            logger.status("Approaching target apoapsis – preparing MECO")
             break
 
-        time.sleep(0.05)
-
-    # --------------- engine cut-off ----------------------------------------
+    # --------------------------------------------------------------------
+    # Main-engine cut-off (MECO)
+    # --------------------------------------------------------------------
     vsl.control.throttle = 0.0
-    deploy_fairing(vsl, "G-01 Fairing Half")
-    time.sleep(1)
-    control_solar_panel(vsl, "SP-002 1x6 Photovoltaic Panels")
-    control_antenna(vsl, "C3 Communotron DTS-M1", "activate")
     logger.info(
-        f"MECO at {alt() / 1000:.1f} km, live Ap {apo() / 1000:.1f} km "
-        "– coasting to circularise."
+        f"MECO at {ALT() / 1000:.1f} km – live Ap {APO() / 1000:.1f} km; coasting "
+        "to circularisation."
     )
