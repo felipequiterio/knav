@@ -42,8 +42,8 @@ def circularization():
     # Estimate burn time
     Isp = vsl.specific_impulse  # [s]
     g0 = body.surface_gravity  # [m/s^2]
-    m0 = vsl.mass
-    m_dot = vsl.available_thrust / (Isp * g0)
+    m0 = vsl.mass  # [kg]
+    m_dot = vsl.available_thrust / (Isp * g0)  # [kg/s]
     dt_burn1 = calculate_burn_time(m_dot, m0, delta_v1, Isp, g0)
     logger.status(f"Estimated burn time: {dt_burn1:.1f}s")
 
@@ -63,7 +63,7 @@ def circularization():
 
     # Enable SAS and ensure it switches to “maneuver-hold”.
     control_sas(vsl, "maneuver")
-
+    time.sleep(6)
     # Execute first burn
     logger.burn("First circularization burn initiated")
     # Use remaining ΔV to drive cut-off for higher accuracy
@@ -120,8 +120,8 @@ def circularization():
     logger.maneuver(f"Second maneuver node created at UT={ut_peri:.1f}")
 
     # Estimate burn time
-    m0 = vsl.mass
-    m_dot = vsl.available_thrust / (Isp * g0)
+    m0 = vsl.mass  # [kg]
+    m_dot = vsl.available_thrust / (Isp * g0)  # [kg/s]
     dt_burn2 = calculate_burn_time(m_dot, m0, abs(delta_v2), Isp, g0)
     logger.status(f"Estimated burn time: {dt_burn2:.1f}s")
 
@@ -139,7 +139,7 @@ def circularization():
     control_sas(vsl, "maneuver")
     logger.align(f"SAS mode confirmed: {vsl.control.sas_mode}")
     # Give SAS a moment to settle on the node direction
-    time.sleep(2)
+    time.sleep(8)
 
     remaining = conn.add_stream(getattr, node2, "remaining_delta_v")
     logger.burn("Second circularization burn initiated")
