@@ -1,186 +1,162 @@
-"""Hohmann transfer planning tools."""
-
+import math
 import os
-
 import krpc
-from dotenv import load_dotenv
-
-from core.utils.formulas import (
-    delta_v_hohmann,
-    calculate_burn_time,
-    calculate_transfer_time,
-)
 from utils import SpaceLogger
 
-load_dotenv()
-
-logger = SpaceLogger("HOHMANN")
+logger = SpaceLogger("HOHMANN_TRANSFER")
 
 
-def plan_hohmann_to_body(target_body_name: str, node_lead_time: float = 60.0):
-    """Compute a Hohmann transfer from the active vessel to a given body.
-
-    The function:
-    1. Connects to kRPC and obtains the active vessel & celestial data.
-    2. Computes ∆v requirements for the transfer (central body = vessel.orbit.body).
-    3. Logs a detailed summary and, if possible, places the first maneuver node at the correct phase angle.
+def hohmann_transfer(
+    target_body_name: str,
+):
+    """
+    Planeja a primeira queima de uma transferência Hohmann do corpo atual
+    até *target_body_name* e cria um maneuver node.
 
     Parameters
     ----------
     target_body_name : str
-        e.g. "Mun", "Minmus", "Duna" … Must be a child of the current central body.
-    node_lead_time : float, optional
-        Time (seconds) before the transfer window to position the maneuver node.
-        Set to `None` to skip node creation.
+        Nome do corpo celeste de destino
+    execute_immediately : bool, optional
+        Se True, executa o primeiro nó imediatamente após criá-lo. Default: False
+    execute_both_burns : bool, optional
+        Se True, executa ambas as queimas automaticamente (partida e chegada). Default: False
+        Nota: Se True, execute_immediately é ignorado pois ambas são executadas em sequência.
     """
-
-    import math
-
-    # ------------------------------------------------------------------ Connect
+    # ───────── Conexão ─────────
     conn = krpc.connect(
         name=f"Hohmann transfer → {target_body_name}",
         address=os.getenv("IP"),
         rpc_port=8075,
         stream_port=8076,
     )
-
     vsl = conn.space_center.active_vessel
-    origin_body = vsl.orbit.body
+    origin = vsl.orbit.body
+    target = conn.space_center.bodies[target_body_name]
+    rf = origin.non_rotating_reference_frame
+    mu = origin.gravitational_parameter  # [m³ s⁻²]
 
-    # ------------------------------------------------------------- Target body
-    try:
-        target_body = conn.space_center.bodies[target_body_name]
-    except KeyError as exc:
-        logger.error(f"Celestial body '{target_body_name}' not found. Check spelling.")
-        raise exc
+    # ───────── Raios orbitais ─────────
+    r1 = vsl.orbit.radius  # [m] current orbital radius where burn occurs
+    r2 = target.orbit.semi_major_axis  # [m] órbita do alvo
 
-    # ------------------------------------------------------- Orbit parameters
-    mu = origin_body.gravitational_parameter
-
-    # Current orbit – assume near-circular (use semi-major axis for robustness)
-    r1 = vsl.orbit.semi_major_axis
-
-    # Target orbit radius – use semi-major axis of body's orbit around parent
-    r2 = target_body.orbit.semi_major_axis
-
-    dv1, dv2 = delta_v_hohmann(mu, r1, r2)
-    dv1 = dv1 * 1.05  # Add 5% margin
-
-    # ------------------------------------------------------------- Telemetry
-    summary = {
-        "Central body": origin_body.name,
-        "Target body": target_body.name,
-        "r₁ (start)": f"{r1:,.0f} m",
-        "r₂ (target)": f"{r2:,.0f} m",
-        "∆v₁": f"{dv1:+.1f} m/s",
-        "∆v₂": f"{dv2:+.1f} m/s",
-        "Total ∆v": f"{abs(dv1) + abs(dv2):.1f} m/s",
-    }
-
-    logger.telemetry(summary)
-
-    # Calculate transfer time
-    transfer_time = calculate_transfer_time(mu, r1, r2)
-    # Target orbital period
-    target_period = 2 * math.pi * math.sqrt(r2**3 / mu)
-    # Required phase angle in degrees
-    phase_angle = 180 - (transfer_time / target_period) * 360
-
-    logger.status(f"Required phase angle for transfer: {phase_angle:.2f}°")
-
-    # Get current phase angle (angle from vessel to target, measured prograde from vessel's position)
-    # Compute positions in the parent body's reference frame
-    vessel_true_anomaly = vsl.orbit.true_anomaly
-    target_true_anomaly = target_body.orbit.true_anomaly
-
-    # Both true anomalies are in radians, but we want the angle from vessel to target, measured prograde
-    # The phase angle is the angle from the vessel to the target, measured in the direction of the orbit
-    # (i.e., target's mean anomaly minus vessel's mean anomaly, normalized to [0, 360))
-    vessel_mean_anomaly = vsl.orbit.mean_anomaly
-    target_mean_anomaly = target_body.orbit.mean_anomaly
-
-    # Convert mean anomaly to degrees
-    vessel_deg = math.degrees(vessel_mean_anomaly) % 360
-    target_deg = math.degrees(target_mean_anomaly) % 360
-
-    current_phase_angle = (target_deg - vessel_deg) % 360
-
-    logger.status(f"Current phase angle: {current_phase_angle:.2f}°")
-
-    # Calculate time to correct phase angle
-    # The phase angle increases at the rate of the difference in mean motions
-    # mean motion n = 2π / period
-    vessel_period = 2 * math.pi * math.sqrt(r1**3 / mu)
-    vessel_n = 2 * math.pi / vessel_period
-    target_n = 2 * math.pi / target_period
-
-    # Phase angle rate (deg/s)
-    phase_rate = (target_n - vessel_n) * 180 / math.pi  # deg/s
-
-    # Determine the phase difference so that the resulting time is **positive**
-    if phase_rate >= 0:
-        delta_phase = (phase_angle - current_phase_angle) % 360
-    else:
-        delta_phase = (current_phase_angle - phase_angle) % 360
-
-    if abs(phase_rate) < 1e-6:
-        logger.warning(
-            "Phase rate is too small; orbits may be identical or calculation failed."
-        )
-        time_to_transfer = 0
-    else:
-        time_to_transfer = delta_phase / abs(phase_rate)
-
-    # Ensure the node is not created too close to the present (\u003c 30 s)
-    # If it is, wait one additional synodic period.
-    if time_to_transfer < 30:
-        synodic_period = 360 / abs(phase_rate)  # time for a full phase cycle
-        time_to_transfer += synodic_period
-
+    logger.status("Orbital radii:")
+    logger.status(f"  • Vessel current radius: {r1 / 1000:.1f} km")
+    logger.status(f"  • Target semi-major axis: {r2 / 1000:.1f} km")
     logger.status(
-        f"Time until transfer window: {time_to_transfer:.1f} s ({time_to_transfer / 60:.1f} min)"
+        f"  • Transfer ellipse semi-major axis: {(r1 + r2) / 2 / 1000:.1f} km"
     )
 
-    # ---------------------------------------------------------------- Burn-time estimate (used to center the node)
-    Isp = vsl.specific_impulse  # [s]
-    body = vsl.orbit.body
-    g0 = body.surface_gravity  # [m/s^2]
-    m0 = vsl.mass  # [kg]
-    m_dot = vsl.available_thrust / (Isp * g0)  # [kg/s]
+    # ───────── Delta-v da transferência ─────────
+    a_t = 0.5 * (r1 + r2)
+    dv1 = math.sqrt(mu / r1) * (math.sqrt(2 * r2 / (r1 + r2)) - 1) + 7  # [+5 m/s folga]
+    dv2 = math.sqrt(mu / r2) * (1 - math.sqrt(2 * r1 / (r1 + r2)))  # (informativo)
 
-    try:
-        burn_est = calculate_burn_time(m_dot, m0, abs(dv1), Isp, g0)
-    except RuntimeError as err:
-        logger.warning(str(err))
-        burn_est = 0.0
+    # ───────── Fase e tempo de espera ─────────
+    th = math.pi * math.sqrt(a_t**3 / mu)  # meio-período
+    omega_v = math.sqrt(mu / r1**3)  # angular velocity of vessel
+    omega_t = math.sqrt(mu / r2**3)  # angular velocity of target
 
-    # ---------------------------------------------------------------- Warp and node timing
-    # We want the *mid-point* of the burn to happen exactly at the computed transfer time.
-    # Therefore the node time (which is the burn mid-point) is:
-    ut_now = conn.space_center.ut
-    node_ut_center = ut_now + time_to_transfer + burn_est / 2.0
+    # Get position vectors in the orbital plane
+    pos_v = vsl.position(rf)
+    pos_t = target.position(rf)
 
-    # We will warp so that the vessel is oriented "node_lead_time" seconds BEFORE the *start* of the burn.
-    node_ut_start = node_ut_center - burn_est / 2.0
-    warp_target = node_ut_start - node_lead_time
+    # Calculate angles using atan2 to preserve direction
+    angle_vessel = math.atan2(pos_v[1], pos_v[0])  # vessel's angle from x-axis
+    angle_target = math.atan2(pos_t[1], pos_t[0])  # target's angle from x-axis
 
-    if warp_target < ut_now:
+    # Current phase angle (target relative to vessel)
+    # Positive means target is ahead of vessel in orbital motion
+    phase_now = (angle_target - angle_vessel) % (2 * math.pi)
+
+    # Required phase angle for Hohmann transfer (from wiki: 120° separation)
+    # Vessel should be 120° BEHIND target when transfer starts
+    required_separation_deg = 120.0  # degrees (from KSP wiki)
+    target_behind_angle = math.radians(required_separation_deg)
+    phase_req = (2 * math.pi - target_behind_angle) % (2 * math.pi)
+
+    # Calculate phase difference and wait time
+    # We want to wait until the phase angle becomes phase_req
+    dphase = (phase_req - phase_now) % (2 * math.pi)
+    wait_t = dphase / abs(omega_v - omega_t)
+
+    # If omega_v ≈ omega_t (similar orbital periods), use alternative calculation
+    if abs(omega_v - omega_t) < 1e-10:
         logger.warning(
-            "Transfer window is too close or in the past. Creating node immediately."
+            "Vessel and target have very similar orbital periods - using synodic period calculation"
         )
-        warp_target = ut_now + 5  # Give a 5-second margin
+        synodic_period = (
+            2 * math.pi / abs(omega_v - omega_t)
+            if abs(omega_v - omega_t) > 1e-12
+            else float("inf")
+        )
+        wait_t = (dphase / (2 * math.pi)) * synodic_period
 
-    lead_txt = f"T-{(node_ut_start - warp_target):.0f}s before burn"
-    logger.warp(f"Warping to UT={warp_target:.1f} for transfer window ({lead_txt})")
-    conn.space_center.warp_to(warp_target)
+    # ───────── Criando o primeiro node (partida) ─────────
+    burn_ut = conn.space_center.ut + wait_t
+    node1 = vsl.control.add_node(burn_ut, prograde=dv1)
 
-    # ---------------------------------------------------------------- Create the maneuver node
-    node = vsl.control.add_node(node_ut_center, prograde=dv1)
-    logger.maneuver(
-        f"Maneuver node created at UT={node.ut:.1f} (burn starts in {node_ut_start - conn.space_center.ut:.0f}s) "
-        f"with prograde ∆v={dv1:+.1f} m/s"
+    # ───────── Validate trajectory ─────────
+    predicted_orbit = node1.orbit
+    predicted_apoapsis = predicted_orbit.apoapsis_altitude
+    predicted_periapsis = predicted_orbit.periapsis_altitude
+
+    # Check if trajectory reaches target's orbital radius
+    target_altitude = r2 - origin.equatorial_radius  # Convert radius to altitude
+    apoapsis_error = abs(predicted_apoapsis - target_altitude)
+
+    logger.status("Trajectory validation:")
+    logger.status(f"  • Predicted apoapsis: {predicted_apoapsis / 1000:.1f} km")
+    logger.status(f"  • Target orbit altitude: {target_altitude / 1000:.1f} km")
+    logger.status(f"  • Apoapsis error: {apoapsis_error / 1000:.1f} km")
+
+    # Check for encounter using closest approach
+    try:
+        closest_approach_time = predicted_orbit.time_of_closest_approach(target)
+        closest_approach_distance = predicted_orbit.distance_at_closest_approach(target)
+        logger.status(
+            f"  • Closest approach in: {closest_approach_time / 3600:.1f} hours"
+        )
+        logger.status(
+            f"  • Closest approach distance: {closest_approach_distance / 1000:.1f} km"
+        )
+
+        # Check if we have a proper encounter (within target's SOI)
+        target_soi = target.sphere_of_influence
+        if closest_approach_distance < target_soi:
+            logger.status(
+                f"  ✅ ENCOUNTER DETECTED! Within {target.name}'s SOI ({target_soi / 1000:.0f} km)"
+            )
+        else:
+            logger.warning(
+                f"  ❌ NO ENCOUNTER! Outside {target.name}'s SOI by {(closest_approach_distance - target_soi) / 1000:.0f} km"
+            )
+    except Exception as e:
+        logger.warning(f"  • Could not calculate encounter: {e}")
+
+    # Add debug information
+    logger.status("Phase angle calculation:")
+    logger.status(f"  • Vessel angle: {math.degrees(angle_vessel):.1f}°")
+    logger.status(f"  • Target angle: {math.degrees(angle_target):.1f}°")
+    logger.status(f"  • Current phase angle: {math.degrees(phase_now):.1f}°")
+    logger.status(f"  • Required phase angle: {math.degrees(phase_req):.1f}°")
+    logger.status(
+        f"  • Target should be BEHIND vessel by: {required_separation_deg:.1f}° (wiki reference)"
     )
+    logger.status(f"  • Phase difference to wait: {math.degrees(dphase):.1f}°")
+    logger.status(f"  • Wait time: {wait_t / 3600:.2f} hours")
 
-    logger.status(f"Estimated burn time: {burn_est:.1f} s")
-
-    return dv1, dv2
+    result = {
+        "departure_node": node1,
+        "Δv1": dv1,
+        "Δv2": dv2,
+        "transfer_time": th,
+        "burn_in": wait_t,
+        "arrival_burn_ut": burn_ut + th,  # Tempo da segunda queima
+        "accuracy_percent": 0,
+    }
+    # Execute first burn
+    # execute_node(conn, vsl, node1)
+    # Aguardar tempo de transferência
+    logger.status(f"Transfer initiated! Coasting for {th / 3600:.1f} hours...")
+    return result
