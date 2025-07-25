@@ -16,7 +16,7 @@ from core.utils.formulas import (
 # Configuration constants
 # ---------------------------------------------------------------------------
 GUIDANCE_DT = 0.05  # [s] integration / guidance cycle period
-TURN_START_ALT = 250  # [m] altitude threshold before we start integrating
+TURN_START_ALT = 900  # [m] altitude threshold before we start integrating
 TARGET_APOAPSIS = 150_000  # [m] desired apoapsis altitude (vacuum)
 MAX_Q_RELATIVE = 0.30  # Max-Q as fraction of sea-level static pressure
 MIN_TWR = 1.2  # Abort if initial thrust-to-weight ratio below this threshold
@@ -64,7 +64,7 @@ def pre_launch():
     # -- acceleration (computed from thrust and mass as flight.acceleration is unavailable)
     accel = lambda: acceleration(available_thrust(), mass())  # [m/s²]
 
-    # -- activate next stage
+    # -- Activate engines -------------------------------------------------
     vsl.control.throttle = 1.0
     vsl.control.activate_next_stage()
 
@@ -100,12 +100,24 @@ def pre_launch():
     logger.info(
         f"Thrust to weight ratio is {thrust_to_weight_ratio():.2f}, continuing..."
     )
-
+    # # get delta v
+    # delta_v = vsl.orbit.get_total_delta_v(vsl.orbit.body.reference_frame)
+    # logger.info(f"Delta-V: {delta_v:.2f} m/s")
     # -- acceletarion
     if accel() < 0.5:
         logger.error("Acceleration is too low, aborting")
         return
     logger.info(f"GO - a₀ = {accel():.2f} m/s²")
+
+    return {
+        "body": body,
+        "mass": mass(),
+        # "delta_v": delta_v,
+        "radius": radius(),
+        "grav_local": grav_local(),
+        "available_thrust": available_thrust(),
+        "thrust_to_weight_ratio": thrust_to_weight_ratio(),
+    }
 
 
 def gravity_turn():
@@ -158,17 +170,40 @@ def gravity_turn():
     q_dyn = Q_DYN()
 
     # -- Autopilot initialisation ----------------------------------------
+    def get_heading_from_direction(direction):
+        """Convert cardinal direction string to heading in degrees."""
+        direction = direction.lower()
+        if direction in ["north", "n"]:
+            return 0
+        elif direction in ["north-east", "ne"]:
+            return 45
+        elif direction in ["north-west", "nw"]:
+            return 135
+        elif direction in ["east", "e"]:
+            return 90
+        elif direction in ["south", "s"]:
+            return 180
+        elif direction in ["west", "w"]:
+            return 270
+        else:
+            raise ValueError(f"Unknown direction: {direction}")
+
+    # Set this parameter to your desired direction: "north", "south", "east", or "west"
+    launch_direction = "east"  # Change as needed
+
+    heading = get_heading_from_direction(launch_direction)
     vsl.control.sas = False
     logger.sas("SAS disabled")
     ap = vsl.auto_pilot
     ap.engage()
     logger.auto_pilot("Autopilot engaged")
-    ap.target_roll = 90  # Heads east
-    ap.target_heading = 90
-    ap.target_pitch_and_heading(90, 90)  # Straight up
+    ap.target_roll = heading  # Roll so that the navball aligns with the heading
+    ap.target_pitch_and_heading(90, heading)  # Straight up, specified heading
 
     # -- Ignite engines ----------------------------------------------------
     vsl.control.throttle = 1.0
+
+    # -- Release launch clamps --------------------------------------------
     vsl.control.activate_next_stage()
     logger.burn("Engines ignited, lift-off! 🚀")
 
@@ -212,7 +247,7 @@ def gravity_turn():
         if T == 0:
             logger.stage("Staging ...")
             vsl.control.activate_next_stage()
-            time.sleep(0.5)
+            time.sleep(3)
             continue  # Skip guidance update this frame
 
         # ----------------------------------------------------------------
@@ -226,7 +261,7 @@ def gravity_turn():
 
         # Convert desired γ to pitch angle and command the autopilot ------
         pitch_cmd = clamp(90.0 - math.degrees(gamma_next), 0.0, 90.0)
-        ap.target_pitch_and_heading(pitch_cmd, 90)
+        ap.target_pitch_and_heading(pitch_cmd, heading)
 
         # Telemetry every ~10 s ------------------------------------------
         if t % 10.0 < GUIDANCE_DT:
