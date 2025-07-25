@@ -1,0 +1,56 @@
+# .streamlit/config.toml
+# ———————————————————————————————
+# Ajustes globais
+[global]
+disableWidgetStateDuplicationWarning = true          # evita spam no log
+showWarningOnDirectExecution = false                 # sem pop-ups no terminal
+
+# ———————————————————————————————
+# Servidor
+[server]
+headless       = true        # não tenta abrir o browser automaticamente :contentReference[oaicite:0]{index=0}
+runOnSave      = true        # recarrega ao salvar o script :contentReference[oaicite:1]{index=1}
+port           = 8501        # porta padrão, mude se houver conflito :contentReference[oaicite:2]{index=2}
+enableCORS     = false       # app local/offline — dispensa CORS :contentReference[oaicite:3]{index=3}
+enableXsrfProtection = false # idem a CORS; simplifica requisições internas :contentReference[oaicite:4]{index=4}
+maxUploadSize  = 1024        # 1 GB para logs ou capturas de tela grandes :contentReference[oaicite:5]{index=5}
+address        = "0.0.0.0"   # escuta em todas as interfaces
+
+# ———————————————————————————————
+# Cliente (front-end)
+[client]
+showErrorDetails     = "none"    # esconde traceback no navegador :contentReference[oaicite:6]{index=6}
+toolbarMode          = "viewer"  # só exibe opções essenciais :contentReference[oaicite:7]{index=7}
+showSidebarNavigation = true     # mantém menu de páginas ligado :contentReference[oaicite:8]{index=8}
+
+# ———————————————————————————————
+# Navegador
+[browser]
+serverAddress  = "localhost"
+gatherUsageStats = false         # sem “phone-home” de uso :contentReference[oaicite:9]{index=9}
+
+# ———————————————————————————————
+# Executor
+[runner]
+magicEnabled = true   # permite “st.write(var)” sozinho :contentReference[oaicite:10]{index=10}
+fastReruns   = true   # resposta imediata a inputs :contentReference[oaicite:11]{index=11}
+
+# ———————————————————————————————
+# Gruvbox-inspired Dark Theme with Kerbal Green
+[theme]
+base                     = "dark"
+primaryColor             = "#4CAF50"        # Kerbal green
+backgroundColor          = "#181818"        # Gruvbox dark0_hard/black
+secondaryBackgroundColor = "#232323"        # Gruvbox dark1/dark grey
+textColor                = "#EBDBB2"        # Gruvbox light1 (warm light)
+linkColor                = "#4CAF50"        # Kerbal green for links
+buttonRadius             = "large"
+borderColor              = "#282828"        # Gruvbox dark2
+font                     = "monospace"
+showSidebarBorder        = false
+
+[theme.sidebar]
+backgroundColor          = "#1B1B1B"        # Gruvbox dark0_soft/black
+textColor                = "#EBDBB2"
+linkColor                = "#4CAF50"
+secondaryBackgroundColor = "#232323"
