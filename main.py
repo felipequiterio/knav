@@ -1,5 +1,4 @@
 from core.launch.gravity_turn import pre_launch, gravity_turn
-from core.orbital.hohmann_transfer import plan_hohmann_to_body
 from core.orbital.circularization import circularization
 from utils import SpaceLogger
 
@@ -26,11 +25,11 @@ def main():
         logger.status("Circularization completed!")
         logger.mission_complete("Circularization")
 
-        logger.mission_start("Hohmann Transfer")
-        logger.info("Starting Hohmann transfer...")
-        plan_hohmann_to_body("Mun")
-        logger.status("Hohmann transfer completed!")
-        logger.mission_complete("Hohmann Transfer")
+        # logger.mission_start("Hohmann Transfer")
+        # logger.info("Starting Hohmann transfer...")
+        # hohmann_transfer("Mun")
+        # logger.status("Hohmann transfer completed!")
+        # logger.mission_complete("Hohmann Transfer")
     except Exception as e:
         logger.error(f"Mission failed: {str(e)}")
         raise
