@@ -4,6 +4,8 @@ from core.utils.formulas import (
     calculate_burn_time,
     calculate_propellant_mass_flow_rate,
 )
+import krpc
+import os
 
 # Local logger for helper utilities
 logger = SpaceLogger("HELPERS")
@@ -54,10 +56,17 @@ def execute_node(
     m_dot = calculate_propellant_mass_flow_rate(thrust, Isp, g0)
     burn_time = calculate_burn_time(m_dot, m0, delta_v, Isp, g0)
 
+    current_ut = conn.space_center.ut
+    time_to_node = node.ut - current_ut
     logger.status("Node execution planned:")
     logger.status(f"  • Delta-v required: {delta_v:.1f} m/s")
     logger.status(f"  • Burn time: {burn_time:.1f} s")
     logger.status(f"  • Node time: UT {node.ut:.1f}")
+    logger.status(f"  • Current UT: {current_ut:.1f}")
+    kerbin_day_seconds = 6 * 3600  # 6 hours per Kerbin day
+    days = int(time_to_node // kerbin_day_seconds)
+    hours = (time_to_node % kerbin_day_seconds) / 3600
+    logger.status(f"  • Time until node: {time_to_node:.1f} s ({days}d {hours:.2f} h)")
 
     # Calculate burn start time (center the burn on the node)
     burn_start_ut = node.ut - burn_time / 2
@@ -132,6 +141,22 @@ def execute_node(
         "accuracy_percent": accuracy,
         "burn_time_actual": time.time() - burn_start_ut,  # Approximate
     }
+
+
+def execute_current_node():
+    """
+    Execute the current node of the vessel.
+    """
+
+    conn = krpc.connect(
+        name="Execute current node",
+        address=os.getenv("IP"),
+        rpc_port=8075,
+        stream_port=8076,
+    )
+    vessel = conn.space_center.active_vessel
+    node = vessel.control.nodes[0]
+    execute_node(conn, vessel, node)
 
 
 def control_sas(vessel, mode: str = "stability"):
