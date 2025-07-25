@@ -3,7 +3,6 @@ Formulas for calculating various physical quantities.
 """
 
 import math
-from typing import Tuple
 
 
 def gravity_local(μ: float, r: float) -> float:
@@ -98,30 +97,6 @@ def vis_viva(μ: float, r: float, a: float) -> float:
     return v
 
 
-def delta_v_hohmann(mu: float, r1: float, r2: float) -> Tuple[float, float]:
-    """Return the two classical Hohmann ∆v legs.
-
-    Args:
-        mu: The gravitational parameter of the body
-        r1: The radius of the initial circular orbit
-        r2: The radius of the target circular orbit
-
-    Returns:
-        The two classical Hohmann ∆v legs
-        dv1: The ∆v for the first burn
-        dv2: The ∆v for the second burn
-
-    Formula:
-        dv1 = sqrt(mu / r1) * (sqrt(2 * r2 / (r1 + r2)) - 1)
-        dv2 = sqrt(mu / r2) * (1 - sqrt(2 * r1 / (r1 + r2)))
-    """
-
-    dv1 = math.sqrt(mu / r1) * (math.sqrt(2 * r2 / (r1 + r2)) - 1)
-    dv2 = math.sqrt(mu / r2) * (1 - math.sqrt(2 * r1 / (r1 + r2)))
-
-    return dv1, dv2
-
-
 def calculate_propellant_mass_flow_rate(F: float, Isp: float, g0: float) -> float:
     """Calculate the propellant mass flow rate.
 
@@ -180,41 +155,6 @@ def calculate_burn_time(
     return burn_time
 
 
-def calculate_transfer_time(mu: float, r1: float, r2: float) -> float:
-    """Calculate the transfer time for a Hohmann transfer.
-
-    Args:
-        mu: The gravitational parameter of the body
-        r1: The radius of the initial circular orbit
-        r2: The radius of the target circular orbit
-
-    Returns:
-        The transfer time [s]
-
-    Formula:
-        t = π * sqrt((r2 + r1)**3 / (8 * mu))
-    """
-    transfer_time = math.pi * math.sqrt((r2 + r1) ** 3 / (8 * mu))
-    return transfer_time
-
-
-def calculate_target_period(mu: float, r2: float) -> float:
-    """Calculate the target period for a Hohmann transfer.
-
-    Args:
-        mu: The gravitational parameter of the body
-        r2: The radius of the target circular orbit
-
-    Returns:
-        The target period [s]
-
-    Formula:
-        T = 2π * sqrt(r2**3 / mu)
-    """
-    target_period = 2 * math.pi * math.sqrt(r2**3 / mu)
-    return target_period
-
-
 def dr_dt(v: float, gamma: float) -> float:
     """Radial velocity component :math:`\dot r = v \sin\gamma`."""
     return v * math.sin(gamma)
@@ -262,124 +202,56 @@ def dm_dt(m_dot: float) -> float:
     return -m_dot
 
 
-def gravity_turn_derivatives(
-    t: float,
-    state: Tuple[float, float, float, float],
-    *,
-    μ: float,
-    T: float,
-    m_dot: float,
-    α: float = 0.0,
-    L: float = 0.0,
-    D: float = 0.0,
-) -> Tuple[float, float, float, float]:
-    """Compute the time-derivatives for the core gravity-turn ODE system.
-
-    The state vector is interpreted as **(r, γ, v, m)** where
-
-    * ``r`` – radial distance from the centre of the body [m]
-    * ``γ`` – flight-path angle measured from the local horizontal [rad]
-    * ``v`` – inertial velocity magnitude [m/s]
-    * ``m`` – instantaneous vehicle mass [kg]
-
-    Parameters
-    ----------
-    t : float
-        Time since launch [s]. (Unused – present for scipy ODE-solver compatibility.)
-    state : Tuple[float, float, float, float]
-        Current state vector ``(r, γ, v, m)``.
-    μ : float
-        Gravitational parameter of the central body (\(μ = G·M\)) [m³/s²].
-    T : float
-        Thrust magnitude assumed *constant* over the integration step [N].
-    m_dot : float
-        Propellant mass-flow rate *magnitude* (positive) [kg/s].  The vehicle mass
-        therefore decreases at a rate ``dm/dt = −m_dot``.
-    α : float, optional
-        Engine gimbal angle *relative to the velocity vector* [rad].  ``α = 0``
-        corresponds to thrust aligned with the velocity (classical gravity turn).
-    L : float, optional
-        Aerodynamic lift magnitude [N].  Can be set to zero when neglected.
-    D : float, optional
-        Aerodynamic drag magnitude [N].  Can be set to zero when neglected.
-
-    Returns
-    -------
-    Tuple[float, float, float, float]
-        The derivatives ``(dr/dt, dγ/dt, dv/dt, dm/dt)``.
-
-    Notes
-    -----
-    The governing equations implemented are (see *Kerbal Space Program* lore and
-    standard launch dynamics references) ::
-
-        dr/dt     = v · sin(γ)
-        dγ/dt     =  v/r · cos(γ) − μ/(r² v) · cos(γ) + T/(m v) · cos(α) + L/(m v)
-        dv/dt     =  T/m − g(r) · sin(γ) − D/m
-        dm/dt     = −ṁ
-
-    where ``g(r) = μ / r²``.
-    """
-
-    # Unpack the state vector ---------------------------------------------------------
-    r, gamma, v, m = state
-
-    # Guard against numerical singularities ------------------------------------------
-    if r <= 0:
-        raise ValueError("Radius must be positive and non-zero.")
-    if v <= 0:
-        raise ValueError(
-            "Velocity must be positive and non-zero to evaluate derivatives."
-        )
-    if m <= 0:
-        raise ValueError(
-            "Vehicle mass became non-positive, check inputs/solver settings."
-        )
-
-    # Local gravity (scalar magnitude)
-    g_r = gravity_local(μ, r)
-
-    # Core derivatives ----------------------------------------------------------------
-    r_dot = v * math.sin(gamma)
-
-    gamma_dot = (
-        (v / r) * math.cos(gamma)
-        - (μ / (r**2 * v)) * math.cos(gamma)
-        + (T / (m * v)) * math.cos(α)
-        + (L / (m * v))
-    )
-
-    v_dot = T / m - g_r * math.sin(gamma) - D / m
-
-    m_dot_dt = -m_dot
-
-    return r_dot, gamma_dot, v_dot, m_dot_dt
-
-
-def gravity_turn_simplified_derivatives(
-    t: float,
-    state: Tuple[float, float, float, float],
-    *,
-    μ: float,
-    T: float,
-    m_dot: float,
-) -> Tuple[float, float, float, float]:
-    """A thin wrapper around :func:`gravity_turn_derivatives` for the classic
-    gravity-turn assumption (thrust perfectly aligned with velocity, no lift/drag).
-    """
-
-    return gravity_turn_derivatives(
-        t,
-        state,
-        μ=μ,
-        T=T,
-        m_dot=m_dot,
-        α=0.0,
-        L=0.0,
-        D=0.0,
-    )
-
-
 def clamp(x: float, lo: float, hi: float) -> float:
     """Return *x* clamped to the inclusive range [lo, hi]."""
     return max(lo, min(hi, x))
+
+
+def calculate_phase_angle(r1: float, r2: float) -> float:
+    """Calculate the phase angle between two bodies in a circular orbit.
+
+    Args:
+        r1: The radius of the first body
+        r2: The radius of the second body
+
+    Returns:
+        The phase angle [rad]
+    """
+
+    phase_angle = math.pi * (1 - math.sqrt((8 * r1**3) / ((r1 + r2) ** 3)))
+    return phase_angle
+
+
+def get_current_phase_angle(vsl, origin, target) -> float:
+    """Get the current phase angle between the vessel and the target.
+
+    Args:
+        vsl: The vessel
+        origin: The origin
+        target: The target
+
+    Returns:
+        The current phase angle [rad]
+    """
+
+    vessel_pos = vsl.position(origin.non_rotating_reference_frame)
+    target_pos = target.position(origin.non_rotating_reference_frame)
+    vessel_angle = math.atan2(vessel_pos[1], vessel_pos[0])
+    target_angle = math.atan2(target_pos[1], target_pos[0])
+    current_phase = (target_angle - vessel_angle) % (2 * math.pi)
+    return current_phase
+
+
+def calculate_lead_angle(r1: float, r2: float) -> float:
+    """Calculate the lead angle between the vessel and the target.
+
+    Args:
+        r1: The radius of the first body
+        r2: The radius of the second body
+
+    Returns:
+        The lead angle [rad]
+    """
+
+    alpha = (math.pi / 2) - math.sqrt(math.pow(r1 + r2, 3) / (2 * r2**3))
+    return alpha
