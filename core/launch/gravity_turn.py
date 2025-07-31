@@ -120,10 +120,13 @@ def pre_launch():
     }
 
 
-def gravity_turn():
+def gravity_turn(target_altitude=150000, target_direction="East"):
     """Launch guidance that steers the vehicle using the planar gravity-turn
     ODE implemented in :pyfunc:`core.utils.formulas.dgamma_dt`.
 
+    Args:
+        target_altitude (int): Target apoapsis altitude in meters (default: 150000)
+        target_direction (str): Launch direction (default: "East")
     """
 
     logger.mission_start("GRAVITY TURN")
@@ -188,10 +191,8 @@ def gravity_turn():
         else:
             raise ValueError(f"Unknown direction: {direction}")
 
-    # Set this parameter to your desired direction: "north", "south", "east", or "west"
-    launch_direction = "east"  # Change as needed
-
-    heading = get_heading_from_direction(launch_direction)
+    # Use the target_direction parameter passed to the function
+    heading = get_heading_from_direction(target_direction)
     vsl.control.sas = False
     logger.sas("SAS disabled")
     ap = vsl.auto_pilot
@@ -236,9 +237,9 @@ def gravity_turn():
         # Throttle management (simple Max-Q and apoapsis guards) ----------
         if q_dyn > q_limit:
             vsl.control.throttle = 0.6  # ease off through Max-Q
-        elif APO() < TARGET_APOAPSIS * 0.8:
+        elif APO() < target_altitude * 0.8:
             vsl.control.throttle = 1.0  # full beans while far from Ap
-        elif APO() < TARGET_APOAPSIS * 0.95:
+        elif APO() < target_altitude * 0.95:
             vsl.control.throttle = 0.4  # feather as we approach target
         else:
             vsl.control.throttle = 0.1  # creep for fine control
@@ -279,7 +280,7 @@ def gravity_turn():
             )
 
         # ----- Termination logic: target apoapsis reached ---------------
-        if APO() >= TARGET_APOAPSIS * 0.98 and q_dyn < 100.0:
+        if APO() >= target_altitude * 0.98 and q_dyn < 100.0:
             logger.status("Approaching target apoapsis – preparing MECO")
             break
 
