@@ -16,7 +16,7 @@ from core.utils.formulas import (
 # Configuration constants
 # ---------------------------------------------------------------------------
 GUIDANCE_DT = 0.05  # [s] integration / guidance cycle period
-TURN_START_ALT = 900  # [m] altitude threshold before we start integrating
+TURN_START_ALT = 5000  # [m] altitude threshold before we start integrating
 TARGET_APOAPSIS = 150_000  # [m] desired apoapsis altitude (vacuum)
 MAX_Q_RELATIVE = 0.30  # Max-Q as fraction of sea-level static pressure
 MIN_TWR = 1.2  # Abort if initial thrust-to-weight ratio below this threshold
