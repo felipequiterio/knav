@@ -233,10 +233,40 @@ def get_experiment_info(experiment):
 
 
 def run_experiment(experiment):
+    """Safely run an experiment.
+
+    The kRPC API raises an exception if an experiment already contains data or
+    cannot be executed under the current flight conditions.  We therefore guard
+    the call with a couple of sanity-checks and swallow (then log) any
+    remaining errors so that a single failing experiment does **not** abort the
+    whole batch.
+
+    Returns
+    -------
+    bool
+        ``True`` if the experiment was actually executed, otherwise ``False``.
     """
-    Run the experiment.
-    """
-    experiment.run()
+
+    # Attribute helpers with graceful fall-backs
+    _name = getattr(experiment, "title", getattr(experiment, "name", str(experiment)))
+
+    # Skip if the experiment already has recorded data ------------------------
+    if getattr(experiment, "has_data", False):
+        logger.info(f"[SKIP] Experiment '{_name}' already contains data")
+        return False
+
+    # Skip if the experiment is not currently available ----------------------
+    if not getattr(experiment, "available", True):
+        logger.info(f"[SKIP] Experiment '{_name}' not available right now")
+        return False
+
+    try:
+        experiment.run()
+        logger.info(f"[RUN] Experiment '{_name}' executed successfully")
+        return True
+    except Exception as exc:  # noqa: BLE001 – broad except on purpose
+        logger.error(f"[FAIL] Experiment '{_name}' failed to run – {exc}")
+        return False
 
 
 def transmit_experiment(experiment):
