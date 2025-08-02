@@ -167,6 +167,13 @@ class SpaceLogger:
         """Log a SAS message."""
         self.logger.info(f"🧭 [SAS ] {msg}")
 
+    def burn(self, msg):
+        """Log a burn message."""
+        self.logger.info(f"🔥 [BURN] {msg}")
+
+    def warp(self, msg):
+        """Log a warp message."""
+        self.logger.info(f"⏩ [WARP] {msg}")
     # ---------------------------------------------------------------- internals
     def _banner(self, mission, state, color):
         """Create a mission banner with the given state."""
