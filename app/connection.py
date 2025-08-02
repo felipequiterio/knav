@@ -1,15 +1,23 @@
 import krpc
 import os
-import dotenv
+from dotenv import load_dotenv
 
-dotenv.load_dotenv()
+load_dotenv()
 
 
-def connect():
-    conn = krpc.connect(
-        name="Maneuver Buttons",
+def connect_maneuver() -> krpc.Client:
+    return krpc.connect(
+        name="Maneuver Connection",
+        address=os.getenv("IP"),
+        rpc_port=8075,
+        stream_port=8076,
+    )
+
+
+def connect_telemetry() -> krpc.Client:
+    return krpc.connect(
+        name="Telemetry Connection",
         address=os.getenv("IP"),
         rpc_port=8077,
         stream_port=8078,
     )
-    return conn
