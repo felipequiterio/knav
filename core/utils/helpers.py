@@ -15,7 +15,13 @@ logger = SpaceLogger("HELPERS")
 
 
 def execute_node(
-    conn, vessel, node, precision_threshold=1.0, throttle_margin=5.0, time_margin=5.0
+    conn,
+    vessel,
+    node,
+    precision_threshold=1.0,
+    throttle_margin=5.0,
+    time_margin=5.0,
+    log=None,
 ):
     """
     Precisely execute a maneuver node with proper burn timing calculation.
@@ -41,7 +47,7 @@ def execute_node(
 
     # Get connection from vessel
     body = vessel.orbit.body
-
+    THRUST = conn.add_stream(getattr, vessel, "available_thrust")  # [N]
     # Calculate burn parameters
     delta_v = node.delta_v
     Isp = vessel.specific_impulse  # [s]
@@ -102,12 +108,28 @@ def execute_node(
     # Main burn phase at full throttle
     vessel.control.throttle = 1.0
     while remaining_dv() > throttle_margin:
+        T = THRUST()
+        # Stage if current stage is empty ---------------------------------
+        if T == 0:
+            log.stage("Staging...")
+            vessel.control.activate_next_stage()
+            time.sleep(4)
+            log.stage("Staging complete.")
+            continue  # Skip guidance update this frame
         time.sleep(0.05)
 
     # Precision phase with reduced throttle
     logger.burn(f"Entering precision phase - {remaining_dv():.1f} m/s remaining")
     vessel.control.throttle = 0.1
     while remaining_dv() > precision_threshold:
+        T = THRUST()
+        # Stage if current stage is empty ---------------------------------
+        if T == 0:
+            log.stage("Staging...")
+            vessel.control.activate_next_stage()
+            time.sleep(4)
+            log.stage("Staging complete.")
+            continue  # Skip guidance update this frame
         time.sleep(0.05)
 
     # Shutdown
