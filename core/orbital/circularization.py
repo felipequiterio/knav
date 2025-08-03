@@ -7,6 +7,7 @@ import krpc
 from utils import SpaceLogger
 from core.parts.part_control import control_sas
 from core.utils.formulas import vis_viva, calculate_burn_time
+from core.utils.helpers import execute_node
 
 load_dotenv()
 logger = SpaceLogger("CIRCULARIZATION")
@@ -69,15 +70,16 @@ def circularization():
     # Use remaining ΔV to drive cut-off for higher accuracy
     remaining1 = conn.add_stream(getattr, node1, "remaining_delta_v")
 
-    # Main portion of the burn
-    vsl.control.throttle = 1.0
-    while remaining1() > 5.0:
-        time.sleep(0.05)
+    execute_node(conn, vsl, node1, log=logger)
+    # # Main portion of the burn
+    # vsl.control.throttle = 1.0
+    # while remaining1() > 5.0:
+    #     time.sleep(0.05)
 
-    # Feather throttle for the last few m/s to avoid overshoot
-    vsl.control.throttle = 0.05
-    while remaining1() > 1.0:
-        time.sleep(0.05)
+    # # Feather throttle for the last few m/s to avoid overshoot
+    # vsl.control.throttle = 0.05
+    # while remaining1() > 1.0:
+    #     time.sleep(0.05)
 
     # Ensure throttle is fully closed before proceeding
     vsl.control.throttle = 0.0
@@ -145,14 +147,15 @@ def circularization():
     logger.burn("Second circularization burn initiated")
     vsl.control.throttle = 1.0
 
-    # Burn until only a few m/s remain
-    while remaining() > 5.0:
-        time.sleep(0.05)
+    execute_node(conn, vsl, node2, log=logger)
+    # # Burn until only a few m/s remain
+    # while remaining() > 5.0:
+    #     time.sleep(0.05)
 
-    # Feather throttle for precision
-    vsl.control.throttle = 0.05
-    while remaining() > 1.0:
-        time.sleep(0.05)
+    # # Feather throttle for precision
+    # vsl.control.throttle = 0.05
+    # while remaining() > 1.0:
+    #     time.sleep(0.05)
 
     vsl.control.throttle = 0.0
     time.sleep(0.5)
