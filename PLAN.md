@@ -10,7 +10,7 @@ KNAV is an external flight software and Mission Control Center for Kerbal Space 
 
 - KRPC server runs inside KSP on configurable ports (default: RPC port 50000, Stream port 50001)
 - Python client library: `krpc` (pip installable)
-- Connection: `conn = krpc.connect(name="KNAV", address="<IP>", rpc_port=50000, stream_port=50001)`
+- Connection: `conn = krpc.connect(name="KNAV", address=KRPC_ADDRESS, rpc_port=50000, stream_port=50001)`
 - Key services: `conn.space_center` (main gateway), `conn.space_center.active_vessel` (current vessel)
 - Scenes: Flight (full control), Space Center (management), VAB/SPH (editors), Tracking Station
 - Streaming: `conn.add_stream(vessel.flight().mean_altitude)` for continuous push data
@@ -105,7 +105,7 @@ knav/
 │   │   ├── maneuver_math.py               # Delta-v calculations
 │   │   ├── lambert.py                     # Lambert solver
 │   │   ├── propagator.py                  # Orbit propagation
-│   │   ├── frames.py                      # Reference frame transforms
+│   │   ├── frames.py                      # Reference frame transforms (stub — future use for interplanetary)
 │   │   └── constants.py                   # KSP body constants (mu, R, SOI, atm)
 │   │
 │   ├── krpc_interface/                    # KRPC abstraction layer
@@ -346,6 +346,49 @@ KRPC Server (KSP)
                               KRPC Server (KSP)
 ```
 
+### 2.5 Concurrency Model
+
+The system has two execution contexts that must coordinate safely:
+
+**GNC Thread** (the executive loop, 20 Hz):
+- Owns all KRPC calls, state machines, and vessel control
+- Runs synchronously — one tick must complete before the next starts
+
+**API Thread** (FastAPI / asyncio event loop):
+- Handles REST requests, WebSocket broadcast, serves frontend
+- Must never call KRPC directly or mutate FSW state
+
+**Coordination mechanisms:**
+
+1. **Command Queue** — `queue.Queue` (thread-safe). API handlers enqueue command objects (e.g., `StartManeuver`, `SetThrottle`). The GNC loop drains the queue at the **start** of each tick before Navigation runs. This guarantees commands are applied at a consistent point in the loop.
+
+2. **VesselState Snapshot** — Navigation builds a new frozen `VesselState` dataclass each tick from KRPC streams. It publishes the snapshot via atomic reference swap (`self._current_state = new_state`). API readers always see a consistent, complete frame — never a half-updated struct.
+
+3. **Event Bus** — Dual-queue design:
+   - `asyncio.Queue` for async consumers (WebSocket broadcaster). The GNC thread calls `loop.call_soon_threadsafe(queue.put_nowait, event)` to cross the thread boundary.
+   - `queue.Queue` for any sync consumers (e.g., logging sinks).
+   - Events: `telemetry_frame`, `state_change`, `maneuver_status`, `log_entry`, `alert`.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  API Thread (asyncio)                                   │
+│                                                         │
+│  REST handler ──▶ command_queue.put(cmd)                │
+│  WS broadcaster ◀── asyncio_event_queue.get()           │
+│  GET /vessel    ◀── read current_state (atomic ref)     │
+└────────────────────────────┬────────────────────────────┘
+                             │ thread boundary
+┌────────────────────────────┴────────────────────────────┐
+│  GNC Thread (synchronous loop)                          │
+│                                                         │
+│  tick_start:  drain command_queue                        │
+│  Navigation:  read KRPC streams → build VesselState     │
+│               swap atomic ref → publish telemetry_frame │
+│  Guidance:    read VesselState, compute commands         │
+│  Control:     apply commands via KRPC                    │
+└─────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 3. State Machine Design
@@ -404,9 +447,31 @@ Transitions:
   POWERED_DESCENT -> LANDED:
       Guard: situation == landed
 
+  LANDED -> PRE_LAUNCH:
+      Guard: Mission.start() AND vessel.situation == pre_launch
+      Note: surface relaunch scenario (e.g., Mun surface -> return)
+
+  MANEUVERING -> COAST_TRANSFER:
+      Guard: maneuver complete AND periapsis < target orbit altitude
+      Clarification: only when the completed burn leaves the vessel on a
+      transfer orbit (e.g., first Hohmann burn). If the burn achieves a
+      stable orbit, transition to ORBIT instead.
+
   ANY -> ABORT:
       Guard: abort command OR critical failure
       Action: throttle = 0, SAS stability, disengage autopilot
+
+  ANY -> IDLE:
+      Guard: quickload/revert detected (scene change to non-flight then back,
+             or vessel.met resets)
+      Action: reset all state machines, teardown streams, re-initialize
+      Note: KSP quickload/revert replaces the game state entirely.
+             Detect via UT jumping backward or vessel reference invalidation.
+
+Note: KRPC has no "escaping" situation. If eccentricity >= 1.0 AND specific
+orbital energy > 0, the vessel is on an escape trajectory. The SM does not
+have a dedicated ESCAPING state — this is handled by Guidance decisions
+(e.g., "do not attempt circularization, alert user").
 ```
 
 ### 3.2 Mission State Machine
@@ -460,28 +525,75 @@ INIT -> IGNITION -> VERTICAL_CLIMB -> PITCH_OVER -> GRAVITY_TURN -> THROTTLE_DOW
   THROTTLE_DOWN: throttle=0.1 (fine control). Exit when apo > 0.98*target
   MECO: throttle=0, disengage autopilot
   COMPLETE: report maneuver result
+
+Tuning defaults (Kerbin sea-level launch):
+  turn_start_alt    = 1000 m       # begin pitch-over
+  q_limit           = 20000 Pa     # Max-Q dynamic pressure ceiling
+  Max-Q throttle    : if q_dyn > q_limit → throttle = 0.6 (reduce aero stress)
+  Apoapsis feathering (throttle schedule as apo approaches target):
+      apo < 80% target  → throttle = 1.0
+      apo ≈ 95% target  → throttle = 0.4
+      apo ≈ 98% target  → throttle = 0.1
+  Termination guard : apo >= target * 0.98 AND q_dyn < 100 Pa
+  Integration       : Forward Euler, dt = GNC tick period (50 ms at 20 Hz)
+  Note: these are starting defaults. Different bodies (Duna, Eve) or vessel
+  TWR ranges will need different values — expose via config (Appendix C).
 ```
 
 **Node Executor (used by circularization, Hohmann burns, etc.):**
 ```
 PLAN -> WARP -> ALIGN -> WAIT_FOR_BURN -> FULL_BURN -> PRECISION_BURN -> SHUTDOWN -> COMPLETE
 
-  PLAN: Compute delta-v, burn time (Tsiolkovsky), burn start UT
-  WARP: warp_to(burn_start_ut - margin)
+  PLAN: Compute delta-v, burn time (Tsiolkovsky), burn start UT.
+        burn_start_ut = node.ut - burn_time/2 - 5s  (5s warp margin)
+  WARP: warp_to(burn_start_ut - margin). Cancel warp on arrival.
   ALIGN: SAS maneuver mode, wait ~6s for attitude settle
   WAIT_FOR_BURN: wait until ut >= burn_start_ut
-  FULL_BURN: throttle=1.0, stage if thrust==0. Exit when remaining_dv < 5 m/s
-  PRECISION_BURN: throttle=0.1. Exit when remaining_dv < 1 m/s
+  FULL_BURN: throttle=1.0. If thrust == 0 → stage and continue.
+        Re-check staging each tick (multi-stage burns).
+        Exit when remaining_dv < 5 m/s
+  PRECISION_BURN: throttle=0.05 (V1-tested value for fine accuracy).
+        If thrust == 0 → stage and continue.
+        Exit when remaining_dv < 0.5 m/s OR dv starts increasing
+        (overshoot guard: if remaining_dv at tick N > tick N-1, shut down)
   SHUTDOWN: throttle=0, remove node, SAS stability
   COMPLETE: report predicted vs actual delta-v accuracy
+```
+
+**Circularization:**
+```
+PLAN -> COMPUTE_DV1 -> CREATE_NODE_AP -> EXECUTE_BURN_1 -> EVALUATE -> [COMPLETE or CORRECTION]
+
+  PLAN: Read current orbit. Determine circularization point (apoapsis for
+        post-launch, periapsis for capture). Validate: orbit must not be
+        escaping (e < 1.0).
+  COMPUTE_DV1: dv1 = circularization_delta_v(mu, r_circ, a_current)
+  CREATE_NODE_AP: Add maneuver node at the circularization point with
+                  prograde = dv1
+  EXECUTE_BURN_1: Delegate to NodeExecutor
+  EVALUATE: Check resulting orbit circularity.
+      If |dv_remaining| > 1 m/s (residual from burn inaccuracy):
+          -> CORRECTION: compute dv2 at opposite apse, create node, execute
+      Else:
+          -> COMPLETE
+  COMPLETE: Report final orbit (Ap, Pe, eccentricity)
+
+  Threshold: circularization is "good enough" when |Ap - Pe| / target_alt < 0.02
+  (2% tolerance). Beyond that, add a correction burn.
 ```
 
 **Hohmann Transfer:**
 ```
 COMPUTE -> WAIT_PHASE -> CREATE_NODE_1 -> EXECUTE_BURN_1 -> COAST -> CREATE_NODE_2 -> EXECUTE_BURN_2 -> COMPLETE
 
-  COMPUTE: Calculate dv1, dv2, transfer time, phase angle
-  WAIT_PHASE: Monitor phase angle vs required. Exit when within tolerance
+  COMPUTE: Calculate dv1, dv2, transfer time, phase angle.
+        tof = hohmann_transfer_time(mu, r1, r2)
+        w2  = mean_motion(mu, r2)          # target angular velocity
+        lead_angle    = w2 * tof           # how far target moves during transfer
+        phase_required = pi - lead_angle   # where target must be at departure
+  WAIT_PHASE: Monitor current_phase_angle vs phase_required.
+        Exit when |current_phase - phase_required| < phase_tolerance (default 1°).
+        Use warp to speed through wait (warp_to estimated alignment UT).
   CREATE_NODE_1: Add node (prograde=dv1) at computed UT
   EXECUTE_BURN_1: Delegate to NodeExecutor
   COAST: Warp to SOI change or transfer orbit apoapsis
@@ -596,6 +708,17 @@ current_phase_angle(vessel_pos, target_pos) -> float
 synodic_period(mu, r1, r2) -> float
     # T_syn = 2*pi / |w1 - w2|
 
+# --- Hohmann Phasing Helpers ---
+hohmann_lead_angle(mu, r1, r2) -> float
+    # How far the target moves during the transfer
+    # tof = pi * sqrt((r1+r2)^3 / (8*mu))
+    # w2  = sqrt(mu / r2^3)
+    # lead_angle = w2 * tof
+
+hohmann_phase_required(mu, r1, r2) -> float
+    # Required phase angle at departure
+    # phase_required = pi - hohmann_lead_angle(mu, r1, r2)
+
 # --- Gravity Turn ODE ---
 dgamma_dt(v, r, gamma, mu, T, m, alpha=0.0, L=0.0) -> float
     # dg/dt = (v/r)*cos(g) - (mu/(r^2*v))*cos(g) + (T/(m*v))*cos(a) + L/(m*v)
@@ -606,6 +729,12 @@ dv_dt(T, m, g_r, gamma, D=0.0) -> float
 dr_dt(v, gamma) -> float
     # dr/dt = v*sin(gamma)
 ```
+
+**Atmosphere note:** The `astro` module is vacuum-only — it has no atmospheric drag
+or pressure model. The gravity turn maneuver handles atmosphere **reactively** by
+reading `vessel.flight().dynamic_pressure` from KRPC telemetry each tick and
+throttling down when Max-Q is exceeded. KSP's internal physics engine handles
+the actual aerodynamic simulation; KNAV just responds to the measured pressure.
 
 ### 4.3 `lambert.py` - Lambert Problem Solver
 
@@ -700,6 +829,16 @@ class StreamError(KRPCError): ...
 class ManeuverError(KRPCError): ...
 ```
 
+**Error Recovery Strategies:**
+
+| Scenario | Detection | Recovery |
+|---|---|---|
+| **Mid-burn disconnect** | `ConnectionLostError` during FULL_BURN/PRECISION_BURN | Cache the active command + remaining dv. On reconnect: read vessel state, compare orbit. If burn clearly incomplete, re-create node with residual dv and resume NodeExecutor from PLAN. If orbit looks good, mark complete. |
+| **Scene change** (user exits to Space Center/VAB) | `SceneManager.detect_scene() != FLIGHT` | Teardown all streams (they become invalid). Pause mission (→ PAUSED state). Emit `scene_change` event. When FLIGHT resumes, re-initialize streams and resume mission. |
+| **Vessel switch** (user switches to another vessel) | `vessel` reference changes (vessel.name or id mismatch) | Abort active maneuver (throttle=0). Reset all per-maneuver SMs. Teardown streams. Re-initialize for new vessel. Emit `vessel_switch` event. |
+| **Vessel destroyed** | `vessel` reference throws `RPCError` on access | Teardown streams. Set vehicle SM → IDLE. Emit `vessel_lost` alert. Wait for user to select new vessel or revert. |
+| **Stream stale / NaN** | Stream callback returns `None` or `float('nan')` | Skip tick (do not run Guidance/Control with bad data). Log warning. If stale for > 5 consecutive ticks, teardown and recreate streams. |
+
 ---
 
 ## 6. Backend Architecture (`knav/api/`)
@@ -770,7 +909,26 @@ class ManeuverError(KRPCError): ...
 }
 ```
 
-Clients subscribe: `{"action": "subscribe", "channels": ["orbit", "flight", "propulsion"]}`
+Client protocol:
+```json
+// Subscribe to channels
+{"action": "subscribe", "channels": ["orbit", "flight", "propulsion"]}
+
+// Unsubscribe from channels
+{"action": "unsubscribe", "channels": ["propulsion"]}
+
+// Server acknowledgment (sent after subscribe/unsubscribe)
+{"type": "subscription_ack", "active_channels": ["orbit", "flight"]}
+```
+
+Backpressure: each WebSocket client has a bounded send queue (max 64 messages).
+On overflow, drop the **oldest** telemetry frame (newest data wins). Events and
+logs are never dropped — they queue separately.
+
+Reconnect: on new WebSocket connection, the server immediately sends a full
+state snapshot (current VesselState + active maneuver status + vehicle SM state)
+before streaming incremental updates. This lets the frontend recover cleanly
+without a separate REST fetch.
 
 **Events** (`/ws/events`) - Push on occurrence:
 ```json
@@ -787,7 +945,30 @@ Clients subscribe: `{"action": "subscribe", "channels": ["orbit", "flight", "pro
 {"level": "INFO", "tag": "BURN", "message": "Node execution initiated - 245.3 m/s burn", "source": "maneuvers.node_executor"}
 ```
 
-### 6.3 Event Bus (`knav/events/bus.py`)
+### 6.3 Logging Architecture
+
+Uses `structlog` with bound loggers per module for structured, contextual logging.
+
+```python
+import structlog
+log = structlog.get_logger("knav.fsw.guidance")  # bound per module
+log.info("burn_started", maneuver="circularization", dv=245.3)
+```
+
+**Output renderers (configured at startup):**
+- **Console** (dev/terminal): `structlog.dev.ConsoleRenderer` — colored, human-readable
+- **JSON** (WebSocket `/ws/logs`): `structlog.processors.JSONRenderer` — machine-parseable, forwarded to event bus as `log_entry` events
+
+**Log levels by subsystem:**
+| Subsystem | INFO | DEBUG |
+|---|---|---|
+| State machines | Transitions (`COAST_ASCENT → ORBIT`) | Guard evaluations |
+| Maneuvers | Phase changes, burn start/stop, result | Per-tick dv remaining, throttle |
+| Navigation | Vessel switch, stream refresh | Per-tick VesselState values |
+| KRPC | Connect, disconnect, reconnect | RPC call timing |
+| API | Request handling, WS connect/disconnect | Subscription changes |
+
+### 6.4 Event Bus (`knav/events/bus.py`)
 
 Thread-safe in-process pub/sub. FSW publishes from its thread; API consumers await events.
 
@@ -812,6 +993,11 @@ Events published per tick:
 - **Orbital viz:** Custom Canvas2D renderer (2D orbit map)
 - **WebSocket:** Native browser WebSocket with reconnection wrapper
 - **State Management:** Zustand (lightweight, works well with WebSocket streams)
+
+**Build & Serve:**
+- **Dev:** Vite dev server (`npm run dev` on port 5173) with proxy config to forward `/api/*` and `/ws/*` to FastAPI (port 8000). No CORS issues in dev because all requests go through the Vite proxy.
+- **Prod:** `npm run build` outputs to `knav/frontend/dist/`. FastAPI serves this directory via `StaticFiles` mount. Single origin, no proxy needed.
+- **CORS:** FastAPI adds `CORSMiddleware` in dev mode only (`allow_origins=["http://localhost:5173"]`). In prod, frontend is same-origin so CORS is not needed.
 
 ### 7.2 Layout
 
@@ -1327,6 +1513,29 @@ class Settings(BaseSettings):
 
     # Physics
     g0: float = 9.81  # standard gravity for Isp calculations
+
+    # Gravity Turn Defaults
+    gt_turn_start_alt: float = 1000.0       # m, begin pitch-over
+    gt_q_limit: float = 20000.0             # Pa, Max-Q throttle-down threshold
+    gt_q_throttle: float = 0.6              # throttle when q_dyn > q_limit
+    gt_feather_80: float = 1.0              # throttle when apo < 80% target
+    gt_feather_95: float = 0.4              # throttle when apo ≈ 95% target
+    gt_feather_98: float = 0.1              # throttle when apo ≈ 98% target
+    gt_termination_apo_frac: float = 0.98   # apo/target ratio for MECO
+    gt_termination_q_max: float = 100.0     # Pa, Max-Q must be below this for MECO
+
+    # Node Executor
+    ne_precision_throttle: float = 0.05     # throttle for precision burn phase
+    ne_full_burn_threshold: float = 5.0     # m/s remaining → switch to precision
+    ne_precision_threshold: float = 0.5     # m/s remaining → shutdown
+    ne_warp_margin: float = 5.0             # seconds before burn_start_ut
+
+    # Circularization
+    circ_correction_threshold: float = 1.0  # m/s, add correction burn if above
+    circ_tolerance_frac: float = 0.02       # |Ap-Pe|/target, "good enough"
+
+    # Hohmann
+    hohmann_phase_tolerance_deg: float = 1.0  # degrees, phase angle match window
 
     model_config = {"env_file": ".env"}
 ```
